@@ -1,0 +1,10 @@
+{
+  "name": "ZDT_EmmV5",
+  "version": "1.0.0",
+  "description": "ZDT EmmV5 步进电机闭环驱动库（张大头 Emm42_V5.0）",
+  "keywords": "stepper, emmv5, zdt, closed-loop",
+  "build": {
+    "includeDir": "inc",
+    "srcDir": "src"
+  }
+}

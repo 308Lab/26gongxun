@@ -1,0 +1,1275 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "cmsis_os.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "Control.h"
+#include "Arm.h"
+#include "Servo.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim8;
+
+UART_HandleTypeDef huart4;
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
+
+/* Definitions for MainTask */
+osThreadId_t MainTaskHandle;
+const osThreadAttr_t MainTask_attributes = {
+  .name = "MainTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for EncCatchTask */
+osThreadId_t EncCatchTaskHandle;
+const osThreadAttr_t EncCatchTask_attributes = {
+  .name = "EncCatchTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for RunTask */
+osThreadId_t RunTaskHandle;
+const osThreadAttr_t RunTask_attributes = {
+  .name = "RunTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for OLEDTask */
+osThreadId_t OLEDTaskHandle;
+const osThreadAttr_t OLEDTask_attributes = {
+  .name = "OLEDTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for TickTask */
+osThreadId_t TickTaskHandle;
+const osThreadAttr_t TickTask_attributes = {
+  .name = "TickTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityRealtime,
+};
+/* Definitions for AAATask */
+osThreadId_t AAATaskHandle;
+const osThreadAttr_t AAATask_attributes = {
+  .name = "AAATask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for BBBTask */
+osThreadId_t BBBTaskHandle;
+const osThreadAttr_t BBBTask_attributes = {
+  .name = "BBBTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for CCCTask */
+osThreadId_t CCCTaskHandle;
+const osThreadAttr_t CCCTask_attributes = {
+  .name = "CCCTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for DDDTask */
+osThreadId_t DDDTaskHandle;
+const osThreadAttr_t DDDTask_attributes = {
+  .name = "DDDTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for ServoTask */
+osThreadId_t ServoTaskHandle;
+const osThreadAttr_t ServoTask_attributes = {
+  .name = "ServoTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for EncQueue */
+osMessageQueueId_t EncQueueHandle;
+const osMessageQueueAttr_t EncQueue_attributes = {
+  .name = "EncQueue"
+};
+/* USER CODE BEGIN PV */
+
+/* 步进电机版本验证测试全局（Arm_ReadVersion 结果，供 OLED 显示） */
+int     g_step_ret = -1;   /* 最近一次读命令返回码：0=成功，负=失败 */
+uint8_t g_step_fw  = 0;    /* 固件版本（低字节） */
+uint8_t g_step_hw  = 0;    /* 硬件版本（低字节） */
+
+/* 【临时桩】上电自动发版本命令：发送次数计数（仅用于验证 MCU→串口发送链路） */
+volatile uint32_t g_step_tx_cnt = 0;
+
+/* 【临时桩】驱动器回包原始字节显示：锁存一帧，长期显示直到下次发送清空 */
+uint8_t  g_step_rx_buf[16] = {0};   /* 锁存的回包帧字节 */
+uint8_t  g_step_rx_len = 0;        /* 锁存帧的字节数 */
+volatile uint8_t g_step_rx_valid = 0; /* 1=锁存帧有效，OLED 可长期显示 */
+
+/* ============================================================
+ * 按键触发 + 解析显示（升级版临时桩）
+ * 每个键发一条读命令 → 解析 → OLED 显示结果
+ * ============================================================ */
+volatile uint8_t g_step_disp_mode = 0;  /* 0=原始回包 1=版本 2=位置 3=误差 4=标志 5=转速 */
+volatile int     g_step_ver_ret   = -1;
+volatile uint16_t g_step_fw_ver   = 0;   /* 固件版本 16 位 */
+volatile uint8_t  g_step_hw_ser   = 0;
+volatile uint8_t  g_step_hw_type  = 0;
+volatile int     g_step_val_ret   = -1;  /* Arm_ReadValue 返回码 */
+volatile int32_t g_step_val       = 0;   /* 符号+数值 转成的有符号值 */
+uint8_t g_step_flags     = 0;   /* 状态标志字节（Arm_ReadFlags 输出，非 volatile，单字节原子读） */
+
+/* 【临时桩】运动测试：按键触发相对运动 + 累计脉冲，便于「收起」回原点 */
+volatile uint32_t g_step_move_pulses = 5600;    /* 左展开脉冲增量（转台90°=5600，减速比7:1） */
+volatile uint32_t g_step_move_cnt    = 0;       /* 运动命令计数 */
+volatile int32_t  g_step_accum_pulses = 0;      /* 带符号累计脉冲：左转/左展开为正，右转为负 */
+
+/* ============================================================
+ * 总线舵机·按键测试桩显示变量（2026-10-01）
+ * ============================================================ */
+volatile uint8_t g_servo_cmd = 0;     /* 当前触发的命令标签（见 OLED 显示 switch） */
+volatile uint8_t g_servo_id  = 0;     /* 解析出的舵机 ID */
+volatile uint16_t g_servo_pwm = 0;    /* 解析出的位置 PWM */
+volatile uint8_t g_servo_state = 0;   /* 0=无应答 1=有应答(OK/ID/POSITION) */
+volatile servo_reply_t g_servo_reply; /* 最近一次回读结果快照 */
+
+/* 【裸回环】接收到的原始字节快照（供 OLED 第四行显示，hex） */
+volatile uint8_t g_servo_rx_disp[8] = {0};  /* 最近接收的字节（最多显示 8 字节） */
+volatile uint8_t g_servo_rx_cnt = 0;         /* 当前已收字节数（可用于显示长度） */
+
+/* ============================================================
+ * 总线舵机·双舵机协同测试状态（2026-10-02，P1+P2 协同）
+ * ============================================================ */
+volatile uint16_t g_servo_time    = 3000;   /* 当前运动时间 ms（初始 3000） */
+volatile uint16_t g_servo_pwm1    = 0;      /* P1 当前位置（ID=1） */
+volatile uint16_t g_servo_pwm2    = 0;      /* P2 当前位置（ID=2） */
+volatile uint8_t  g_servo_valid1  = 0;      /* P1 位置有效标志 */
+volatile uint8_t  g_servo_valid2  = 0;      /* P2 位置有效标志 */
+volatile uint32_t g_servo_query_tick = 0;   /* 上次查询位置的 tick */
+
+/* P1/P2 电压（x10 V，来自 PRTV 解析） */
+volatile int16_t g_servo_v1 = 0;            /* P1 电压 x10 V */
+volatile int16_t g_servo_v2 = 0;            /* P2 电压 x10 V */
+volatile uint8_t g_servo_phase = 0;         /* 轮询拍序：0=P1位置 1=P1电压 2=P2位置 3=P2电压 */
+
+/* 键3 B 展开两段时序：先舵机展开，等固定时间后步进再左转 */
+volatile uint8_t  g_b_step_armed = 0;       /* 1=已有展开动作在排队等步进触发 */
+volatile uint32_t g_b_step_due_tick = 0;    /* 步进左转的触发时刻（tick） */
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_TIM8_Init(void);
+static void MX_UART4_Init(void);
+static void MX_USART1_UART_Init(void);
+void StartMainTask(void *argument);
+void StartEncCatchTask(void *argument);
+void StartRunTask(void *argument);
+void StartOLEDTask(void *argument);
+void StartTickTask(void *argument);
+void StartAAATask(void *argument);
+void StartBBBTask(void *argument);
+void StartCCCTask(void *argument);
+void StartDDDTask(void *argument);
+void StartServoTask(void *argument);
+
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/* Host(USART3) 逐字节接收缓存，Host.c / stm32f1xx_it.c 均 extern 引用 */
+uint8_t rx_byte_cache;
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_TIM3_Init();
+  MX_USART2_UART_Init();
+  MX_USART3_UART_Init();
+  MX_TIM1_Init();
+  MX_TIM8_Init();
+  MX_UART4_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE BEGIN 2 */
+
+  /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* Create the queue(s) */
+  /* creation of EncQueue */
+  EncQueueHandle = osMessageQueueNew (4, sizeof(Encoder_Sample_t), &EncQueue_attributes);
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of MainTask */
+  MainTaskHandle = osThreadNew(StartMainTask, NULL, &MainTask_attributes);
+
+  /* creation of EncCatchTask */
+  EncCatchTaskHandle = osThreadNew(StartEncCatchTask, NULL, &EncCatchTask_attributes);
+
+  /* creation of RunTask */
+  RunTaskHandle = osThreadNew(StartRunTask, NULL, &RunTask_attributes);
+
+  /* creation of OLEDTask */
+  OLEDTaskHandle = osThreadNew(StartOLEDTask, NULL, &OLEDTask_attributes);
+
+  /* creation of TickTask */
+  TickTaskHandle = osThreadNew(StartTickTask, NULL, &TickTask_attributes);
+
+  /* creation of AAATask */
+  AAATaskHandle = osThreadNew(StartAAATask, NULL, &AAATask_attributes);
+
+  /* creation of BBBTask */
+  BBBTaskHandle = osThreadNew(StartBBBTask, NULL, &BBBTask_attributes);
+
+  /* creation of CCCTask */
+  CCCTaskHandle = osThreadNew(StartCCCTask, NULL, &CCCTask_attributes);
+
+  /* creation of DDDTask */
+  DDDTaskHandle = osThreadNew(StartDDDTask, NULL, &DDDTask_attributes);
+
+  /* creation of ServoTask */
+  ServoTaskHandle = osThreadNew(StartServoTask, NULL, &ServoTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 0;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 65535;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 0;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 0;
+  if (HAL_TIM_Encoder_Init(&htim1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 0;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 999;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.Pulse = 20;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
+
+}
+
+/**
+  * @brief TIM8 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM8_Init(void)
+{
+
+  /* USER CODE BEGIN TIM8_Init 0 */
+
+  /* USER CODE END TIM8_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM8_Init 1 */
+
+  /* USER CODE END TIM8_Init 1 */
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 0;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period = 65535;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.RepetitionCounter = 0;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 0;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 0;
+  if (HAL_TIM_Encoder_Init(&htim8, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim8, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM8_Init 2 */
+
+  /* USER CODE END TIM8_Init 2 */
+
+}
+
+/**
+  * @brief UART4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART4_Init(void)
+{
+
+  /* USER CODE BEGIN UART4_Init 0 */
+
+  /* USER CODE END UART4_Init 0 */
+
+  /* USER CODE BEGIN UART4_Init 1 */
+
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 115200;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
+
+  /* USER CODE END UART4_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, Laser_Pin|INA219_SDA_Pin|ServoTx_Switch_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, INA219_SCL_Pin|ServoRx_Switch_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOE, Key_Row_3_Pin|Key_Row_2_Pin|Key_Row_1_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, BIN_2_Pin|BIN_1_Pin|OLED_SCL_Pin|OLED_SDA_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOD, AIN_1_Pin|AIN_2_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : Laser_Pin ServoTx_Switch_Pin */
+  GPIO_InitStruct.Pin = Laser_Pin|ServoTx_Switch_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : INA219_SDA_Pin */
+  GPIO_InitStruct.Pin = INA219_SDA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(INA219_SDA_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : INA219_SCL_Pin */
+  GPIO_InitStruct.Pin = INA219_SCL_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(INA219_SCL_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : Key_Row_3_Pin Key_Row_2_Pin Key_Row_1_Pin */
+  GPIO_InitStruct.Pin = Key_Row_3_Pin|Key_Row_2_Pin|Key_Row_1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : Key_Col_1_Pin Key_Col_2_Pin Key_Col_3_Pin */
+  GPIO_InitStruct.Pin = Key_Col_1_Pin|Key_Col_2_Pin|Key_Col_3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : BIN_2_Pin BIN_1_Pin OLED_SCL_Pin OLED_SDA_Pin */
+  GPIO_InitStruct.Pin = BIN_2_Pin|BIN_1_Pin|OLED_SCL_Pin|OLED_SDA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : AIN_1_Pin AIN_2_Pin */
+  GPIO_InitStruct.Pin = AIN_1_Pin|AIN_2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : ServoRx_Switch_Pin */
+  GPIO_InitStruct.Pin = ServoRx_Switch_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(ServoRx_Switch_GPIO_Port, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartMainTask */
+/**
+  * @brief  Function implementing the MainTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartMainTask */
+void StartMainTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  Control_Init();
+  Arm_Init();   /* 步进电机 Emm_V5：绑定 USART1 + 启动接收 */
+
+  /* ========================================================================
+   * 【步进电机·按键触发读参数 + 解析｜临时桩】
+   *   键 1 → 读版本（0x1F）
+   *   键 2 → 读实时位置（0x36）
+   *   键 3 → 读位置误差（0x37）
+   *   键 7 → 读状态标志（0x3A）
+   *   键 9 → 读实时转速（0x35）
+   * 原「路径测试按键」已注释（#if 0），需要时恢复。
+   * ====================================================================== */
+  g_step_ret = -1;
+  g_step_fw  = 0;
+  g_step_hw  = 0;
+  g_step_tx_cnt = 0;
+  g_step_disp_mode = 0;
+  g_step_ver_ret = -1;
+  g_step_val_ret = -1;
+
+  TickType_t last_wake = xTaskGetTickCount();
+  /* Infinite loop */
+  for(;;)
+  {
+    /* ===== 决策层：路径状态机 tick（原 AAATask） ===== */
+    PathRunner_Tick();
+
+    /* ===== Host 2.0 上下位机通信解析：消费已完整收到的帧 ===== */
+    CommunicateToHost();
+    if (parsed_flag)
+    {
+      /* TODO: 根据解析出的指令执行对应动作（业务层接入） */
+      parsed_flag = 0;
+    }
+
+    /* ===== 步进×舵机 姿态测试（P1=ID1 + P2=ID2 ＋ 步进 EmmV5） =====
+     * 键1→回初始位：舵机组发 P1=2137/P2=1776，步进反向转回累计量
+     * 键2→A 展开：舵机组发 P1=0674/P2=0500，步进不动
+     * 键3→B 展开：舵机组发 P1=1400/P2=0800，步进左转 90°（5600 脉冲，逆时针）
+     * 每 50ms 交替轮询 P1/P2 位置（解析完一个再查另一个） */
+    if (Key_Check(KEY_TO_A, KEY_DOWN))   /* 键 1：回初始位 */
+    {
+      g_servo_time = 3000;
+      g_servo_cmd = 1;
+      Servo_SendGroup("#001P2137T3000!#002P1776T3000!");
+      /* 步进反向转回累计量（左转累计为正 → 反向 CCW） */
+      if (g_step_accum_pulses != 0)
+      {
+        uint32_t back = (g_step_accum_pulses > 0) ? (uint32_t)g_step_accum_pulses
+                                                  : (uint32_t)(-g_step_accum_pulses);
+        Arm_MoveRelative(back, ARM_DIR_CCW);
+        g_step_accum_pulses = 0;
+      }
+    }
+    if (Key_Check(KEY_TO_B, KEY_DOWN))   /* 键 2：A 展开（仅舵机） */
+    {
+      g_servo_time = 3000;
+      g_servo_cmd = 2;
+      Servo_SendGroup("#001P0674T3000!#002P0500T3000!");
+    }
+    if (Key_Check(KEY_TO_C, KEY_DOWN))   /* 键 3：B 展开（先舵机展开，2s 后步进左转 90°） */
+    {
+      g_servo_time = 3000;
+      g_servo_cmd = 3;
+      Servo_SendGroup("#001P1400T5000!#002P0800T5000!");
+      /* 步进延后触发：记录 3.5s 后的时刻，到点再左转 */
+      g_b_step_armed = 1;
+      g_b_step_due_tick = HAL_GetTick() + 3500;
+    }
+
+    /* 键3 两段时序：舵机展开 2s 后，步进左转 90°（逆时针 CW） */
+    if (g_b_step_armed && ((int32_t)(HAL_GetTick() - g_b_step_due_tick) >= 0))
+    {
+      g_b_step_armed = 0;
+      Arm_MoveRelative(5600, ARM_DIR_CW);
+      g_step_accum_pulses += 5600;
+    }
+
+    /* 四拍轮询：每 50ms 走一拍，200ms 刷完 P1/P2 的位置+电压。
+     *   拍0=P1位置  拍1=P1电压  拍2=P2位置  拍3=P2电压 */
+    if ((HAL_GetTick() - g_servo_query_tick) >= 50)
+    {
+      g_servo_query_tick = HAL_GetTick();
+      switch (g_servo_phase)
+      {
+        case 0: Servo_ReadAngle(1);      break;   /* P1 位置 */
+        case 1: Servo_ReadTempVolt(1);   break;   /* P1 电压 */
+        case 2: Servo_ReadAngle(2);      break;   /* P2 位置 */
+        case 3: Servo_ReadTempVolt(2);   break;   /* P2 电压 */
+        default: break;
+      }
+      g_servo_phase = (g_servo_phase + 1) & 0x03;   /* 0→1→2→3→0 */
+    }
+
+    /* 轮询总线舵机回读：按返回类型 + ID 存到对应变量（不在此切换目标） */
+    if (Servo_HasReply())
+    {
+      servo_reply_t r = Servo_GetReply();
+      if (r.kind == SERVO_REPLY_POSITION)
+      {
+        if (r.id == 1)
+        {
+          g_servo_pwm1 = r.pwm;
+          g_servo_valid1 = 1;
+        }
+        else if (r.id == 2)
+        {
+          g_servo_pwm2 = r.pwm;
+          g_servo_valid2 = 1;
+        }
+      }
+      else if (r.kind == SERVO_REPLY_TV)
+      {
+        if (r.id == 1)
+        {
+          g_servo_v1 = r.volt_x10;
+        }
+        else if (r.id == 2)
+        {
+          g_servo_v2 = r.volt_x10;
+        }
+      }
+    }
+
+#if 0
+    /* ==================== 原路径测试：按键触发（分段测试） ==================== */
+    /* 键1→去A  键2→去B  键3→去C
+     * 键7→去D  键8→去终点
+     * 键9→陀螺仪校准
+     * 注：用 KEY_DOWN（按下沿），与按键测试同源更可靠。
+     * 除正在 MOVING 外，任意状态均可直接跳转（IDLE/TASK/DONE 都能重新导向）。 */
+    if (Key_Check(KEY_CALIB, KEY_DOWN))
+    {
+      Car_YawCalibrate();
+    }
+
+    if (g_run_state != RUN_ST_MOVING)
+    {
+      if (Key_Check(KEY_TO_A, KEY_DOWN))   { PathRunner_Goto(0); }
+      if (Key_Check(KEY_TO_B, KEY_DOWN))   { PathRunner_Goto(1); }
+      if (Key_Check(KEY_TO_C, KEY_DOWN))   { PathRunner_Goto(2); }
+      if (Key_Check(KEY_TO_D, KEY_DOWN))   { PathRunner_Goto(3); }
+      if (Key_Check(KEY_TO_END, KEY_DOWN)) { PathRunner_Goto(4); }
+    }
+#endif
+
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(5));
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartEncCatchTask */
+/**
+* @brief Function implementing the EncCatchTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartEncCatchTask */
+void StartEncCatchTask(void *argument)
+{
+  /* USER CODE BEGIN StartEncCatchTask */
+  /* Infinite loop */
+  TickType_t last_wake = xTaskGetTickCount();
+  Encoder_Init();
+  Odom_Reset();
+  
+  for(;;)
+  {
+    Encoder_Sample_t motor;
+    motor.enc_l = -(Encoder_Get_MA_Counter());
+    motor.enc_r = Encoder_Get_MB_Counter();   /* 右轮编码器方向反，去掉外层负号（Encoder_Get_MB 内部已取负） */
+    g_enc_l = motor.enc_l;
+    g_enc_r = motor.enc_r;
+    Encoder_Total_Counter(g_enc_l, g_enc_r);
+    osMessageQueuePut (EncQueueHandle, &motor, 0, 0);
+
+    /* 里程计：差值法累计距离（只读不清，独立于上面的读-清速度采样） */
+    Odom_Sample();
+
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(5));
+  }
+  /* USER CODE END StartEncCatchTask */
+}
+
+/* USER CODE BEGIN Header_StartRunTask */
+/**
+* @brief Function implementing the RunTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartRunTask */
+void StartRunTask(void *argument)
+{
+  /* USER CODE BEGIN StartRunTask */
+  TickType_t last_wake = xTaskGetTickCount();
+
+  /* 执行层：记录已处理过的命令 seq，防同一条命令重复执行 */
+  uint16_t last_seq = 0;
+
+  /* Infinite loop */
+  for(;;)
+  {
+    /* 周期读 INA219 四值存全局变量，供 OLED 显示 */
+    //INA219_Update();
+
+    /* ===== 执行层：消费 MainTask 下发的命令 g_cmd ===== */
+    if (g_cmd.seq != last_seq)
+    {
+      last_seq = g_cmd.seq;
+      switch (g_cmd.cmd)
+      {
+        case CMD_GO:
+          Go_Start(g_cmd.param, g_cmd.heading);
+          break;
+        case CMD_ARC:
+          Arc_Start(g_cmd.dir, g_cmd.param);
+          break;
+        case CMD_TURN:
+          Turn_Start((float)g_cmd.dir * g_cmd.param);
+          break;
+        case CMD_NONE:
+        default:
+          break;
+      }
+    }
+
+    /* 每周期扫描转弯/弧线/直行状态：进行中才动作，到位自动 Stop */
+    Turn_Update();
+    Arc_Update();
+    Go_Update();
+
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(5));
+  }
+  /* USER CODE END StartRunTask */
+}
+
+/* USER CODE BEGIN Header_StartOLEDTask */
+/**
+* @brief Function implementing the OLEDTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartOLEDTask */
+void StartOLEDTask(void *argument)
+{
+  /* USER CODE BEGIN StartOLEDTask */
+  OLED_Init();
+
+  /* ========================================================================
+   * 【跑图调试显示】yaw/PWM（4行×16列）
+   *   行1: yaw + err（角度环核心）
+   *   行2: 左右轮 PWM
+   *   行3: dv（速度差）
+   *   行4: 空
+   * ====================================================================== */
+  /* Infinite loop */
+  for(;;)
+  {
+#if 0
+    /* ==================== 原跑图显示（已注释，需要时恢复） ==================== */
+    OLED_ShowString(1, 1, "Y:");
+    OLED_ShowSignedNum(1, 3, (int32_t)(Car_GetYaw() * 10.0f), 4);
+    OLED_ShowString(1, 9, "e:");
+    OLED_ShowSignedNum(1, 11, g_dbg_heading_err, 4);
+
+    OLED_ShowString(2, 1, "L:");
+    OLED_ShowSignedNum(2, 3, g_dbg_outL, 4);
+    OLED_ShowString(2, 9, "R:");
+    OLED_ShowSignedNum(2, 11, g_dbg_outR, 4);
+
+    OLED_ShowString(3, 1, "dv:");
+    OLED_ShowSignedNum(3, 4, g_dbg_heading_dv, 5);
+#endif
+
+    /* ==================== 舵机位置+电压显示 ====================
+     * 行1: P1位置+电压  行2: P2位置+电压
+     * 行3: 标题/P1详情  行4: P2详情
+     * 四行：P1(pos) / P1(volt) / P2(pos) / P2(volt) */
+    OLED_ShowString(1, 1, "P1:");
+    if (g_servo_valid1) { OLED_ShowNum(1, 4, g_servo_pwm1, 4); }
+    else                { OLED_ShowString(1, 4, "----"); }
+    OLED_ShowString(1, 9, "V:");
+    OLED_ShowSignedNum(1, 11, g_servo_v1, 3);   /* x10 V，显示前两位 */
+
+    OLED_ShowString(2, 1, "P2:");
+    if (g_servo_valid2) { OLED_ShowNum(2, 4, g_servo_pwm2, 4); }
+    else                { OLED_ShowString(2, 4, "----"); }
+    OLED_ShowString(2, 9, "V:");
+    OLED_ShowSignedNum(2, 11, g_servo_v2, 3);
+
+    OLED_ShowString(3, 1, "V x0.1 unit");
+    OLED_ShowString(4, 1, "Time:");
+    OLED_ShowNum(4, 6, g_servo_time, 4);
+    OLED_ShowString(4, 10, "ms");
+
+    osDelay(10);
+  }
+
+  /* ========================================================================
+   * 【按键显示测试｜已注释】按哪个键显示哪个数字，需要时启用。
+   * ====================================================================== */
+#if 0
+  static const uint8_t key_num[KEY_COUNT] = { 7, 8, 9, 4, 5, 6, 1, 2, 3 };
+  uint8_t last_key = 0;
+  uint8_t have = 0;
+  uint8_t i;
+  OLED_ShowString(1, 1, "Key Test");
+  for(;;)
+  {
+    for (i = 0; i < KEY_COUNT; i++)
+      if (Key_Check(i, KEY_DOWN)) { last_key = key_num[i]; have = 1; }
+    if (have) { OLED_ShowString(2, 1, "Key:"); OLED_ShowNum(3, 5, last_key, 1); }
+    else      { OLED_ShowString(2, 1, "Press a key"); OLED_ShowString(3, 1, "              "); }
+    osDelay(10);
+  }
+#endif
+  /* USER CODE END StartOLEDTask */
+}
+
+/* USER CODE BEGIN Header_StartTickTask */
+/**
+* @brief Function implementing the TickTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTickTask */
+void StartTickTask(void *argument)
+{
+  /* USER CODE BEGIN StartTickTask */
+  /* Infinite loop */
+  for(;;)
+  {
+    Key_Tick();
+    osDelay(5);   /* 固定周期 5ms；Key_Tick 内部 Count>=2 采样，约 10ms 消抖一次 */
+  }
+  /* USER CODE END StartTickTask */
+}
+
+/* USER CODE BEGIN Header_StartAAATask */
+/**
+* @brief Function implementing the AAATask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartAAATask */
+void StartAAATask(void *argument)
+{
+  /* USER CODE BEGIN StartAAATask */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartAAATask */
+}
+
+/* USER CODE BEGIN Header_StartBBBTask */
+/**
+* @brief Function implementing the BBBTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartBBBTask */
+void StartBBBTask(void *argument)
+{
+  /* USER CODE BEGIN StartBBBTask */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartBBBTask */
+}
+
+/* USER CODE BEGIN Header_StartCCCTask */
+/**
+* @brief Function implementing the CCCTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartCCCTask */
+void StartCCCTask(void *argument)
+{
+  /* USER CODE BEGIN StartCCCTask */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartCCCTask */
+}
+
+/* USER CODE BEGIN Header_StartDDDTask */
+/**
+* @brief Function implementing the DDDTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartDDDTask */
+void StartDDDTask(void *argument)
+{
+  /* USER CODE BEGIN StartDDDTask */
+  /* Infinite loop */
+  for(;;)
+  {
+    /* 终点到达：path_runner 置 g_end_reached 后，在这里执行终点动作。
+     * 当前占位：检测到标志即停车（终点动作待填实）。 */
+    if (g_end_reached)
+    {
+      /* TODO 终点动作：例如结束蜂鸣/机械臂归位/灯光等，当前占位仅停车 */
+      Stop();
+      g_end_reached = 0;   /* 消费标志，避免重复执行 */
+    }
+    osDelay(5);
+  }
+  /* USER CODE END StartDDDTask */
+}
+
+/* USER CODE BEGIN Header_StartServoTask */
+/**
+* @brief Function implementing the ServoTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartServoTask */
+void StartServoTask(void *argument)
+{
+  /* USER CODE BEGIN StartServoTask */
+  Servo_UartInit();   /* 启动 UART4 总线舵机半双工接收 */
+  /* Infinite loop */
+  for(;;)
+  {
+    Servo_Poll();     /* 轮询解析回读应答 */
+    osDelay(5);
+  }
+  /* USER CODE END StartServoTask */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM2 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM2)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
