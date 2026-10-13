@@ -17,7 +17,8 @@
 
 #include "Servo.h"
 
-#include "OLED.h"
+/* OLED.h 已随旧显示层一并移除 —— 显示现在走 u8g2（见 u8g2_port.h / ui_form.h）。
+ * 注意：引脚宏 OLED_SCL_Pin / OLED_SDA_Pin 来自 CubeMX 的 main.h，与上面那个头无关，仍在使用。 */
 
 /* ====================  ==================== */
 

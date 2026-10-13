@@ -26,8 +26,10 @@
 #include "Arm.h"
 #include "Servo.h"
 #include "arm_config.h"
+#include "arm_kinematics.h"
 #include "Vision.h"
-#include "formal_mode.h"
+#include "task_seq.h"
+#include "ui_form.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -133,122 +135,25 @@ const osMessageQueueAttr_t EncQueue_attributes = {
 };
 /* USER CODE BEGIN PV */
 
-/* 步进电机版本验证测试全局（Arm_ReadVersion 结果，供 OLED 显示） */
-int     g_step_ret = -1;   /* 最近一次读命令返回码：0=成功，负=失败 */
-uint8_t g_step_fw  = 0;    /* 固件版本（低字节） */
-uint8_t g_step_hw  = 0;    /* 硬件版本（低字节） */
-
-/* 【临时桩】上电自动发版本命令：发送次数计数（仅用于验证 MCU→串口发送链路） */
-volatile uint32_t g_step_tx_cnt = 0;
-
-/* 【临时桩】驱动器回包原始字节显示：锁存一帧，长期显示直到下次发送清空 */
-uint8_t  g_step_rx_buf[16] = {0};   /* 锁存的回包帧字节 */
-uint8_t  g_step_rx_len = 0;        /* 锁存帧的字节数 */
-volatile uint8_t g_step_rx_valid = 0; /* 1=锁存帧有效，OLED 可长期显示 */
-
-/* ============================================================
- * 按键触发 + 解析显示（升级版临时桩）
- * 每个键发一条读命令 → 解析 → OLED 显示结果
- * ============================================================ */
-volatile uint8_t g_step_disp_mode = 0;  /* 0=原始回包 1=版本 2=位置 3=误差 4=标志 5=转速 */
-volatile int     g_step_ver_ret   = -1;
-volatile uint16_t g_step_fw_ver   = 0;   /* 固件版本 16 位 */
-volatile uint8_t  g_step_hw_ser   = 0;
-volatile uint8_t  g_step_hw_type  = 0;
-volatile int     g_step_val_ret   = -1;  /* Arm_ReadValue 返回码 */
-volatile int32_t g_step_val       = 0;   /* 符号+数值 转成的有符号值 */
-uint8_t g_step_flags     = 0;   /* 状态标志字节（Arm_ReadFlags 输出，非 volatile，单字节原子读） */
-
-/* 【临时桩】运动测试：按键触发相对运动 + 累计脉冲，便于「收起」回原点 */
-volatile uint32_t g_step_move_pulses = 5600;    /* 左展开脉冲增量（转台90°=5600，减速比7:1） */
-volatile uint32_t g_step_move_cnt    = 0;       /* 运动命令计数 */
+/* θ1 步进软累加器：步进无绝对零点，靠软件累加维护当前方位（正 = 左转/左展开）。
+ * 由 main.c 的 StepGoTo 与 formal_mode.c 的 FormalStepGoTo 读写。
+ * （2026-10-13：此处原有 20 余个「按键测试桩」显示全局，全部无读者，已清掉。） */
 volatile int32_t  g_step_accum_pulses = 0;      /* 带符号累计脉冲：左转/左展开为正，右转为负 */
 
 /* ============================================================
- * 总线舵机·按键测试桩显示变量（2026-10-01）
+ * 总线舵机·位置采样环（主循环每 50ms 读一个，P1→P2→P3 轮替，一轮 ≈150ms）
+ *   pwm*   = 读回的【实测】位置（不是命令值）
+ *   valid* = 该路是否读到过（0 时 pwm* 无意义）
  * ============================================================ */
-volatile uint8_t g_servo_cmd = 0;     /* 当前触发的命令标签（见 OLED 显示 switch） */
-volatile uint8_t g_servo_id  = 0;     /* 解析出的舵机 ID */
-volatile uint16_t g_servo_pwm = 0;    /* 解析出的位置 PWM */
-volatile uint8_t g_servo_state = 0;   /* 0=无应答 1=有应答(OK/ID/POSITION) */
-volatile servo_reply_t g_servo_reply; /* 最近一次回读结果快照 */
-
-/* 【裸回环】接收到的原始字节快照（供 OLED 第四行显示，hex） */
-volatile uint8_t g_servo_rx_disp[8] = {0};  /* 最近接收的字节（最多显示 8 字节） */
-volatile uint8_t g_servo_rx_cnt = 0;         /* 当前已收字节数（可用于显示长度） */
-
-/* ============================================================
- * 总线舵机·双舵机协同测试状态（2026-10-02，P1+P2 协同）
- * ============================================================ */
-volatile uint16_t g_servo_time    = 3000;   /* 当前运动时间 ms（初始 3000） */
 volatile uint16_t g_servo_pwm1    = 0;      /* P1 当前位置（ID=1） */
 volatile uint16_t g_servo_pwm2    = 0;      /* P2 当前位置（ID=2） */
 volatile uint8_t  g_servo_valid1  = 0;      /* P1 位置有效标志 */
 volatile uint8_t  g_servo_valid2  = 0;      /* P2 位置有效标志 */
 volatile uint16_t g_servo_pwm3    = 0;      /* P3 当前位置（ID=3） */
 volatile uint8_t  g_servo_valid3  = 0;      /* P3 位置有效标志 */
-volatile uint32_t g_servo_query_tick = 0;   /* 上次查询位置的 tick */
+volatile uint8_t g_servo_phase = 0;         /* 当前该读哪个舵机：0=P1 1=P2 2=P3 */
+volatile uint32_t g_servo_lastsend_tick = 0; /* 上次发送读命令时刻 */
 
-/* P1/P2 电压（x10 V，来自 PRTV 解析） */
-volatile int16_t g_servo_v1 = 0;            /* P1 电压 x10 V */
-volatile int16_t g_servo_v2 = 0;            /* P2 电压 x10 V */
-volatile uint8_t g_servo_phase = 0;         /* 当前该读哪个舵机：0=P1 1=P2 2=P3（事件驱动采样环） */
-volatile uint32_t g_servo_lastsend_tick = 0; /* 上次发送读命令时刻（超时看门狗） */
-
-volatile uint8_t g_a_expanded = 0;          /* 键2 A 姿态 toggle：0=收起态 1=展开态（展开/收起交替） */
-
-/* ============================================================
- * 展开/回收两步时序状态机（2026-10-07 定稿）
- *   展开：t=0 夹爪开 + 总线舵机先动(3s)；t=+2s 步进 θ1 后动
- *   收起：t=0 步进 θ1 先动；          t=+2s 总线舵机 + 夹爪关 后动
- *   B收起中转(kind=2)：四步先后 舵机→展开态 / 步进→5600 / 步进→0 / 舵机→初始
- *   用 g_seq_kind 区分展开(0)/收起(1)/B中转(2)/A中转(3)/B预存(4)，
- *   g_seq_step_pulses 存步进目标。
- * ============================================================ */
-volatile uint8_t  g_seq_kind = 0;           /* 0=展开(总线先) 1=收起(步进先) 2=B收起中转 3=A收起中转 4=B预存 */
-volatile uint8_t  g_seq_phase = 0;          /* 0=空闲 1/2/3=等第2/3/4步 */
-volatile uint32_t g_seq_due_tick = 0;       /* 下一步触发时刻 */
-volatile int32_t  g_seq_step_pulses = 0;    /* 步进 θ1 目标脉冲（下一步执行） */
-
-/* 任务姿态调试：当前激活的任务态（供 OLED 显示） */
-volatile uint8_t  g_servo_disp_mode = 0;    /* 0=收起 1=A 2=B 7=B左 8=B中 9=B右 */
-
-/* 三舵机位置标定模式（2026-10-08）：P3 重标
- *   键1=广播释放扭力  键3=广播恢复扭力  键2=P3 设置初始值
- *   值含义（供 OLED 行1 标签）：0=标定中 1=已释放 2=已恢复 3=已设初始 */
-volatile uint8_t  g_servo_calib_mode = 0;
-
-/* 手动持续前进开关（键5 按下切换，测 PWM/电机是否起作用） */
-volatile uint8_t  g_manual_fwd = 0;   /* 0=停 1=持续前进（直接喂固定 PWM，不闭环） */
-
-/* 激光/夹爪手动开关（键 7/8/9） */
-volatile uint8_t  g_laser_on  = 0;   /* 0=关 1=开（键7 切换） */
-volatile uint8_t  g_grip_open = 0;   /* 0=回位(135°) 1=张开(45°)（键4 切换） */
-
-/* ============================================================
- * 实测标定序列状态机（2026-10-08 二版）
- *   分阶段实测找位值：一键跑一小段动作序列（见 Cal_Start/Cal_RunStep）。
- * ============================================================ */
-volatile uint8_t  g_cal_seq      = 0;    /* 序列号 1~7，0=空闲 */
-volatile uint8_t  g_cal_step     = 0;    /* 序列内当前步号 */
-volatile uint32_t g_cal_due_tick = 0;    /* 下一步触发时刻 */
-volatile uint8_t  g_cal_a_state  = 0;    /* 键1 toggle：0=收起 1=展开 */
-
-/* ============================================================
- * 自动演示链调度（2026-10-08）
- *   全自动跑车+臂：path_runner 到任务点(B/D)后自动串跑对应的臂
- *   序列链，链尾自动 PathRunner_TaskDone()。
- *   g_chain_next：下一个待触发的序列号（0=无待触发，链空闲）。
- * ============================================================ */
-volatile uint8_t  g_chain_next = 0;   /* 待触发序列号，0=空闲 */
-volatile uint8_t  g_chain_last = 0;   /* 最后启动的序列号（识别链尾完成） */
-
-/* ============================================================
- * 启动前摇（2026-10-08）：按下键 1 后 2s 陀螺仪校准 + 1s 后车启动。
- *   g_start_phase：0=空闲 1=等校准(2s) 2=等启动(1s)
- * ============================================================ */
-volatile uint8_t  g_start_phase = 0;      /* 0=空闲 1=等校准 2=等启动 */
-volatile uint32_t g_start_due_tick = 0;   /* 下一步触发时刻 */
 
 /* ============================================================
  * 总线舵机·独立外环位置环（2026-10-02）
@@ -907,699 +812,58 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-/* ============================================================
- * 激光开关（GPIOC.1 = Laser_Pin）
- *   🔴 LASER_ON_LEVEL 待实测：默认高电平点亮；若反了改 GPIO_PIN_RESET。
- * ============================================================ */
-#define LASER_ON_LEVEL   GPIO_PIN_SET
-static void Laser_Set(uint8_t on)
-{
-  GPIO_PinState s = on ? LASER_ON_LEVEL
-                       : ((LASER_ON_LEVEL == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET);
-  HAL_GPIO_WritePin(Laser_GPIO_Port, Laser_Pin, s);
-}
+/* （2026-10-13：此处原有 Laser_Set()。激光改由 task_seq.c 的 ACT_LASER_ON/OFF 控制，
+ *   直接写 Laser_Pin —— 电平约定待上机确认，反了改那两处的 GPIO_PIN_SET/RESET。） */
 
-/* 步进 θ1 相对原点定位：转到目标累计脉冲（相对定位 + 软累加器）
- *   delta = target - g_step_accum_pulses
- *   delta>0 → 左转 ARM_DIR_CW（正累计）；delta<0 → 右转 ARM_DIR_CCW */
-static void StepGoTo(int32_t target_pulses)
-{
-  int32_t delta = target_pulses - g_step_accum_pulses;
-  if (delta > 0)
-  {
-    Arm_MoveRelative((uint32_t)delta, ARM_DIR_CW);
-  }
-  else if (delta < 0)
-  {
-    Arm_MoveRelative((uint32_t)(-delta), ARM_DIR_CCW);
-  }
-  g_step_accum_pulses = target_pulses;
-}
-
-/* 慢速步进（D 救援段用，速度减半 30 RPM） */
-static void StepGoToSlow(int32_t target_pulses)
-{
-  int32_t delta = target_pulses - g_step_accum_pulses;
-  if (delta > 0)
-  {
-    Arm_MoveRelativeSlow((uint32_t)delta, ARM_DIR_CW);
-  }
-  else if (delta < 0)
-  {
-    Arm_MoveRelativeSlow((uint32_t)(-delta), ARM_DIR_CCW);
-  }
-  g_step_accum_pulses = target_pulses;
-}
+/* （2026-10-13：此处原有 StepGoTo / StepGoToSlow 两个静态函数，是旧标定序列的
+ *   θ1 定位工具。标定序列已删除，同样的逻辑现在在 task_seq.c 的 ACT_STEP1 里，
+ *   且带慢速变体 ACT_STEP1_SLOW。main.c 不再需要这两个函数。） */
 
 /* ============================================================
- * 实测标定序列状态机（2026-10-08 二版）
- *   目的：分阶段实测找位值。一键跑一小段动作序列，配合 OLED
- *   的 P1/P2/P3 实时读回，人肉读出实际到位 PWM 后回填 arm_config.h。
+ * 末端位姿上报（0x14，协议 §3.1d）：MCU 每 100ms 主动上报 TCP 位置。
  *
- *   序列：
- *     SEQ 1  A 点（腕 P3 平伸→回位，其余不动）【演示链使用】
- *     SEQ 2  A 收起（腕 P3→home + 夹爪关）【未使用】
- *     SEQ 3  B 展开接俯身（舵机展开→步进90°→俯身）【演示链使用】
- *     SEQ 4  B 夹取→升起→转身180°→准备放置【演示链使用】
- *     SEQ 5  放置→收夹爪→升起→90°回→收起【演示链使用】
- *     SEQ 6  C 点（步进左转→P3平伸→激光→转回→P3回位）【演示链使用】
- *     SEQ 7  C 收起（步进回→舵机 home + 夹爪关）【未使用】
- *     SEQ 8  D 展开接俯身【演示链使用】
- *     SEQ 9  D 夹取→升起→转身90°【演示链使用】
- *     SEQ 10 D 收起（夹爪保持夹取 95°）【演示链使用】
- *     SEQ 11 键6 起身（B展开）→ 转桶方向【已改由 SEQ13，保留待用】
- *     SEQ 12 键5 D 升起转身（先展开态再转身，慢速）【姿态测试使用】
- *     SEQ 13 键6 D 救援（收起姿态，慢速）【姿态测试使用】
- *     SEQ 14 键1 D 展开（舵机先 2s → 步进后）【姿态测试使用】
- *     SEQ 15 键2 D 左预存（舵机先 → 步进后）【姿态测试使用】
- *     SEQ 16 键3 D 中预存（舵机先 → 步进后）【姿态测试使用】
- *     SEQ 17 键4 D 右预存（舵机先 → 步进后）【姿态测试使用】
+ * FK 的输入用【读回的实测 PWM】+ θ1 软累加器，所以报的是**实际姿态**而不是命令值
+ * —— 这正是协议要它的理由（供上位机实时监控/绘制）。
  *
- *   规则：展开「先舵机再步进」，收起「先步进再舵机」；
- *         展开即夹爪打开，收起夹爪关回中性 135°（D 收起例外：保持夹取）。
- *   步进 θ1 用软累加器绝对定位（StepGoTo），各步目标脉冲如下：
- *     B/D 展开 +90°=5600；转身 180°=5600→-5600；回中=0。
+ * ⚠️ 精度声明（重要）：本帧只用于【观察趋势】，不是标定过的真值。arm_fk 目前有两个
+ *    已知缺口：① ARM_L23_OFFSET_MM(20mm) 与关节零位角没有参与解算（arm_config.h 有
+ *    值，arm_kinematics.c 未用）；② 机械零位基准待实测。所以数值会有几十 mm 量级的
+ *    系统偏差。详见 26-GX-upper 的 docs/2026-10-13_接口对齐记录.md。
  * ============================================================ */
+#define POSE_REPORT_PERIOD_MS  100   /* 10Hz，与协议 §3.1d「固定周期上报」一致 */
+static uint32_t s_pose_report_tick = 0;
 
-static void Cal_Start(uint8_t seq)
+/* 暂不启用（原因见 MainTask 里的说明）。加 unused 属性把实现保留在这里，
+ * 等 FK 补齐后只取消 MainTask 里那一行的注释即可 —— 同时保持零警告基线。 */
+static void __attribute__((unused)) ReportPoseTick(void)
 {
-  g_cal_seq  = seq;
-  g_cal_step = 1;
-  g_cal_due_tick = 0;   /* 0 = 立即执行第 1 步 */
+  if ((int32_t)(HAL_GetTick() - s_pose_report_tick) < POSE_REPORT_PERIOD_MS)
+  {
+    return;
+  }
+  s_pose_report_tick = HAL_GetTick();
+
+  /* 三个舵机的实测位置都读回来过才报：未读回时 g_servo_pwm* 是 0，
+   * arm_pwm_to_angle(0) 会换算出很大的负角，报出去就是纯垃圾。 */
+  if (!g_servo_valid1 || !g_servo_valid2 || !g_servo_valid3)
+  {
+    return;
+  }
+
+  arm_joint_t j;
+  j.th1 = ARM_STEP_PULSE2DEG((float)g_step_accum_pulses);
+  j.th2 = arm_pwm_to_angle(ARM_TH2_ID, g_servo_pwm1);
+  j.th3 = arm_pwm_to_angle(ARM_TH3_ID, g_servo_pwm2);
+  j.th4 = arm_pwm_to_angle(ARM_TH4_ID, g_servo_pwm3);
+
+  arm_pos_t p;
+  arm_fk(&j, &p);
+
+  /* z 补上 H0（回转面 → θ2 轴心高度）：协议 §3.1d 要的是基座系坐标。
+   * arm_fk 的输出 z 是相对底座回转面的，不含这一段。 */
+  Vision_ReportPose((int16_t)p.x, (int16_t)p.y, (int16_t)(p.z + ARM_H0_MM));
 }
 
-/* 链内启动：启动序列并记录链尾标识（仅供自动演示链使用）。
- * 手动标定键不要走这里，避免误串下一段序列。 */
-static void Chain_Launch(uint8_t seq)
-{
-  Cal_Start(seq);
-  g_chain_last = seq;
-}
-
-/* ============================================================
- * 自动演示链：启动某个任务点的成套臂序列。
- *   串到尾的序列会把 g_chain_next 置 0（链结束）。
- *   A 点：SEQ1（P3 平伸→回位）
- *   B 点：SEQ3(展开俯身)→SEQ4(夹取升起转身放置)→SEQ5(放置升起回收)
- *   C 点：SEQ6（步进左转→P3平伸→激光→转回→P3回位）
- *   D 点：SEQ8(展开俯身)→SEQ9(夹取升起转身90°)→SEQ10(收起)
- * ============================================================ */
-static void __attribute__((unused)) Chain_StartTask(uint8_t target_idx)
-{
-  if (target_idx == 0)      /* A 点：SEQ1（P3 平伸→回位，其余不动） */
-  {
-    Chain_Launch(1);
-  }
-  else if (target_idx == 1) /* B 点：SEQ3→4→5 */
-  {
-    Chain_Launch(3);
-  }
-  else if (target_idx == 2) /* C 点：SEQ6（步进左转→P3平伸→激光→转回→P3回位） */
-  {
-    Chain_Launch(6);
-  }
-  else if (target_idx == 3) /* D 点：SEQ8→9→10 */
-  {
-    Chain_Launch(8);
-  }
-  else
-  {
-    /* 终点等其它点：直接视为完成任务 */
-    PathRunner_TaskDone();
-  }
-}
-
-/* 串链推进：MainTask 循环在 g_cal_seq==0（一段刚结束）时调用。
- *   若刚结束的是链尾序列，则 task_done 并清链；否则串跑下一个序列。 */
-static void __attribute__((unused)) Chain_Tick(void)
-{
-  if (g_chain_last == 0)
-  {
-    return;   /* 从未启动过链（或已清链） */
-  }
-
-  switch (g_chain_last)
-  {
-    case 1:   /* A 尾（SEQ1 单序列）：完成 */
-    case 5:   /* B 链尾（SEQ5） */
-    case 6:   /* C 尾（SEQ6 单序列）：完成 */
-    case 10:  /* D 链尾（SEQ10） */
-      g_chain_last = 0;
-      g_chain_next = 0;
-      PathRunner_TaskDone();
-      break;
-
-    case 3:   /* B：SEQ3 完 → SEQ4 */
-      Chain_Launch(4);
-      break;
-    case 4:   /* B：SEQ4 完 → SEQ5 */
-      Chain_Launch(5);
-      break;
-    case 8:   /* D：SEQ8 完 → SEQ9 */
-      Chain_Launch(9);
-      break;
-    case 9:   /* D：SEQ9 完 → SEQ10 */
-      Chain_Launch(10);
-      break;
-
-    default:
-      /* 其它序列（如手动标定键触发）结束：不串链，清链 */
-      g_chain_last = 0;
-      g_chain_next = 0;
-      break;
-  }
-}
-
-/* 执行当前步，并安排下一步时刻；序列结束时清 g_cal_seq=0 */
-static void Cal_RunStep(void)
-{
-  switch (g_cal_seq)
-  {
-    /* ---------- SEQ 1：A 点（P3 平伸→回位，其余不动） ---------- */
-    case 1:
-      switch (g_cal_step)
-      {
-        case 1: /* 腕 P3 → 平伸（P1/P2/夹爪/步进 均不动） */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_P3_FLAT_108, 2000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2500;
-          break;
-        case 2: /* 腕 P3 → 回位 home（机械臂收好） */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_HOME_P3, 2000);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 2500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 2：A 收起 ---------- */
-    case 2:
-      switch (g_cal_step)
-      {
-        case 1: /* 腕 P3→home + 夹爪关（θ1 未动，无步进） */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_HOME_P3, 2000);
-          PWM_Servo_SetAngle(ARM_GRIP_PARK_DEG);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 3：B 展开接俯身 ---------- */
-    case 3:
-      switch (g_cal_step)
-      {
-        case 1: /* 展开（舵机先动） */
-          PWM_Servo_SetAngle(ARM_GRIP_OPEN_DEG);
-          Servo_SendGroup("#001P1710T3000!#002P1700T3000!#003P0500T3000!");
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 2: /* 步进 θ1 左转 90°（后动） */
-          StepGoTo(ARM_DEMO_STEP_90);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4500;
-          break;
-        case 3: /* 俯身 腕部 P3（先） */
-          Servo_SetAngleTime(ARM_TH4_ID, 584, 1000);
-          g_cal_step = 4; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 4: /* 俯身 小臂 P2（次） */
-          Servo_SetAngleTime(ARM_TH3_ID, 1701, 1000);
-          g_cal_step = 5; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 5: /* 俯身 大臂 P1（后，3 秒缓动） */
-          Servo_SetAngleTime(ARM_TH2_ID, 1281, 3000);
-          g_cal_step = 6; g_cal_due_tick = HAL_GetTick() + 3000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 4：B 夹取→升起→转身180°→准备放置 ---------- */
-    case 4:
-      switch (g_cal_step)
-      {
-        case 1: /* 夹取 */
-          PWM_Servo_SetAngle(ARM_GRIP_CLOSE_DEG);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 1200;
-          break;
-        case 2: /* 升起 大臂 P1（先） */
-          Servo_SetAngleTime(ARM_TH2_ID, 1521, 1000);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 3: /* 升起 小臂 P2（次） */
-          Servo_SetAngleTime(ARM_TH3_ID, 1500, 1000);
-          g_cal_step = 4; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 4: /* 升起 腕部 P3（后） */
-          Servo_SetAngleTime(ARM_TH4_ID, 584, 1000);
-          g_cal_step = 5; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 5: /* 转身 180°（θ1 5600 → -5600） */
-          StepGoTo(-ARM_DEMO_STEP_90);
-          g_cal_step = 6; g_cal_due_tick = HAL_GetTick() + 8000;
-          break;
-        case 6: /* 准备放置（俯身到桶：腕→小臂→大臂） */
-          Servo_SetAngleTime(ARM_TH4_ID, 584, 1000);
-          g_cal_step = 7; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 7:
-          Servo_SetAngleTime(ARM_TH3_ID, 1750, 1000);
-          g_cal_step = 8; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 8:
-          Servo_SetAngleTime(ARM_TH2_ID, 1553, 1000);
-          g_cal_step = 9; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 5：放置→收夹爪→升起→90°回→收起 ---------- */
-    case 5:
-      switch (g_cal_step)
-      {
-        case 1: /* 放置：夹爪 45° 张开 */
-          PWM_Servo_SetAngle(ARM_GRIP_OPEN_DEG);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 1200;
-          break;
-        case 2: /* 收夹爪 135° */
-          PWM_Servo_SetAngle(ARM_GRIP_PARK_DEG);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 1200;
-          break;
-        case 3: /* 升起 大臂 P1（先） */
-          Servo_SetAngleTime(ARM_TH2_ID, 1521, 1000);
-          g_cal_step = 4; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 4: /* 升起 小臂 P2 */
-          Servo_SetAngleTime(ARM_TH3_ID, 1500, 1000);
-          g_cal_step = 5; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 5: /* 升起 腕部 P3 */
-          Servo_SetAngleTime(ARM_TH4_ID, 584, 1000);
-          g_cal_step = 6; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 6: /* 步进 θ1 90°回（-5600 → 0，先步进） */
-          StepGoTo(0);
-          g_cal_step = 7; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        case 7: /* 收起（舵机 home，后动） */
-          Servo_SendGroup("#001P1976T3000!#002P2425T3000!#003P1762T3000!");
-          g_cal_step = 8; g_cal_due_tick = HAL_GetTick() + 3500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 6：C 点（步进左转→P3平伸→激光→转回→P3回位） ---------- */
-    case 6:
-      switch (g_cal_step)
-      {
-        case 1: /* 步进 θ1 左转 90°（先动） */
-          StepGoTo(ARM_DEMO_STEP_90);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        case 2: /* 腕 P3 → 平伸 */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_P3_FLAT_108, 2000);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 2500;
-          break;
-        case 3: /* 开激光 */
-          Laser_Set(1);
-          g_cal_step = 4; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 4: /* 关激光（激光保持 2 秒） */
-          Laser_Set(0);
-          g_cal_step = 5; g_cal_due_tick = HAL_GetTick();
-          break;
-        case 5: /* 步进 θ1 转回 0 */
-          StepGoTo(0);
-          g_cal_step = 6; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        case 6: /* 腕 P3 → 回位（机械臂收好） */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_HOME_P3, 2000);
-          g_cal_step = 7; g_cal_due_tick = HAL_GetTick() + 2500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 7：C 收起 ---------- */
-    case 7:
-      switch (g_cal_step)
-      {
-        case 1: /* 步进 θ1 回 0（先步进） */
-          StepGoTo(0);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        case 2: /* 舵机 home + 夹爪关（后动） */
-          Servo_SendGroup("#001P1976T3000!#002P2425T3000!#003P1762T3000!");
-          PWM_Servo_SetAngle(ARM_GRIP_PARK_DEG);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 3500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 8：D 展开接俯身 ---------- */
-    case 8:
-      switch (g_cal_step)
-      {
-        case 1: /* 展开（舵机先动，沿用 B 展开值） */
-          PWM_Servo_SetAngle(ARM_GRIP_OPEN_DEG);
-          Servo_SendGroup("#001P1710T3000!#002P1700T3000!#003P0500T3000!");
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 2: /* 步进 θ1 左转 90°（后动） */
-          StepGoTo(ARM_DEMO_STEP_90);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4500;
-          break;
-        case 3: /* 俯身 腕部 P3（先） */
-          Servo_SetAngleTime(ARM_TH4_ID, 1119, 1000);
-          g_cal_step = 4; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 4: /* 俯身 小臂 P2（次） */
-          Servo_SetAngleTime(ARM_TH3_ID, 1968, 1000);
-          g_cal_step = 5; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 5: /* 俯身 大臂 P1（后，3 秒缓动） */
-          Servo_SetAngleTime(ARM_TH2_ID, 1309, 3000);
-          g_cal_step = 6; g_cal_due_tick = HAL_GetTick() + 3000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 9：D 夹取→升起→转身180° ---------- */
-    case 9:
-      switch (g_cal_step)
-      {
-        case 1: /* 夹取 */
-          PWM_Servo_SetAngle(ARM_GRIP_CLOSE_DEG);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 1200;
-          break;
-        case 2: /* 升起 大臂 P1（先） */
-          Servo_SetAngleTime(ARM_TH2_ID, 1521, 1000);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 3: /* 升起 小臂 P2 */
-          Servo_SetAngleTime(ARM_TH3_ID, 1300, 1000);
-          g_cal_step = 4; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 4: /* 升起 腕部 P3（上翻到初始） */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_HOME_P3, 1000);
-          g_cal_step = 5; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 5: /* 转身 90°（θ1 5600 → 0） */
-          StepGoTo(0);
-          g_cal_step = 6; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 10：D 收起（夹爪保持夹取 95°） ---------- */
-    case 10:
-      switch (g_cal_step)
-      {
-        case 1: /* 步进 θ1 回 0（先步进） */
-          StepGoTo(0);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        case 2: /* 舵机 home（后动），P3 上翻到初始，夹爪保持夹取不关 */
-          Servo_SendGroup("#001P1976T3000!#002P2425T3000!#003P1762T3000!");
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 3500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 11：键6 起身（B展开）→ 转桶方向（2026-10-13） ---------- */
-    case 11:
-      switch (g_cal_step)
-      {
-        case 1: /* 起身 = B 展开观察态（夹爪开 + 舵机先动） */
-          PWM_Servo_SetAngle(ARM_GRIP_OPEN_DEG);
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_B_P1, 3000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_B_P2, 3000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_B_P3, 3000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 2: /* 步进 θ1 → 5600（后动，左转 90°） */
-          StepGoTo(ARM_TH1_MID_PULSE);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4500;
-          break;
-        case 3: /* 转桶方向：步进 θ1 → -5600（右转，桶在右侧） */
-          StepGoTo(-ARM_TH1_MID_PULSE);
-          g_cal_step = 4; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 12：键5 D 升起转身（先展开态再转身，慢速 2026-10-13） ---------- */
-    case 12:
-      switch (g_cal_step)
-      {
-        case 1: /* 升到展开态：舵机 P1/P2/P3 → D 展开（慢 4s，舵机先动） */
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_D_P1, 4000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_D_P2, 4000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_D_P3, 4000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 2: /* 转身：步进 θ1 → 5600（慢速，后动） */
-          StepGoToSlow(ARM_TH1_D_MID_PULSE);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 13：键6 D 救援（收起姿态，慢速 2026-10-13） ---------- */
-    case 13:
-      switch (g_cal_step)
-      {
-        case 1: /* 步进先动：θ1 → 0（慢速） */
-          StepGoToSlow(0);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 5000;
-          break;
-        case 2: /* 舵机后动：P1/P2/P3 → 收起态（慢 4s），夹爪保持夹取 95° 不关 */
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_HOME_P1, 4000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_HOME_P2, 4000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_HOME_P3, 4000);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 14：键1 D 展开（舵机先动 2s → 步进后动）---------- */
-    case 14:
-      switch (g_cal_step)
-      {
-        case 1: /* 夹爪开 + 舵机展开（先动） */
-          PWM_Servo_SetAngle(ARM_GRIP_OPEN_DEG);
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_D_P1, 3000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_D_P2, 3000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_D_P3, 3000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 2: /* 步进 θ1 → 5600（后动） */
-          StepGoTo(ARM_TH1_D_MID_PULSE);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 15：键2 D 左预存（舵机先 2s → 步进后）---------- */
-    case 15:
-      switch (g_cal_step)
-      {
-        case 1: /* 舵机 → 左预存（先动） */
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_D_LEFT_P1, 2000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_D_LEFT_P2, 2000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_D_LEFT_P3, 2000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 1500;
-          break;
-        case 2: /* 步进 θ1 → 7777（后动） */
-          StepGoTo(ARM_TH1_D_LEFT_PULSE);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 16：键3 D 中预存（舵机先 2s → 步进后）---------- */
-    case 16:
-      switch (g_cal_step)
-      {
-        case 1: /* 舵机 → 中预存（先动） */
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_D_MID_P1, 2000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_D_MID_P2, 2000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_D_MID_P3, 2000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 1500;
-          break;
-        case 2: /* 步进 θ1 → 5600（后动） */
-          StepGoTo(ARM_TH1_D_MID_PULSE);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 17：键4 D 右预存（舵机先 2s → 步进后）---------- */
-    case 17:
-      switch (g_cal_step)
-      {
-        case 1: /* 舵机 → 右预存（先动） */
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_D_RIGHT_P1, 2000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_D_RIGHT_P2, 2000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_D_RIGHT_P3, 2000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 1500;
-          break;
-        case 2: /* 步进 θ1 → 3734（后动） */
-          StepGoTo(ARM_TH1_D_RIGHT_PULSE);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 18：键7 B 展开（单独，无转桶）---------- */
-    case 18:
-      switch (g_cal_step)
-      {
-        case 1: /* 夹爪开 + 舵机 → B 展开（先动） */
-          PWM_Servo_SetAngle(ARM_GRIP_OPEN_DEG);
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_B_P1, 3000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_B_P2, 3000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_B_P3, 3000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 2: /* 步进 θ1 → 5600（后动，左转 90°） */
-          StepGoTo(ARM_TH1_B_MID_PULSE);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 19：键8 C 展开（θ1 左转 + P3 平伸，P1/P2 不动）---------- */
-    case 19:
-      switch (g_cal_step)
-      {
-        case 1: /* 步进 θ1 左转 90°（先动） */
-          StepGoTo(ARM_TH1_C_MID_PULSE);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 4000;
-          break;
-        case 2: /* 腕 P3 → 平伸 1858（P1/P2 不动） */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_P3_FLAT_108, 2000);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 2500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 20：键9 D 展开（单独）---------- */
-    case 20:
-      switch (g_cal_step)
-      {
-        case 1: /* 夹爪开 + 舵机 → D 展开（先动） */
-          PWM_Servo_SetAngle(ARM_GRIP_OPEN_DEG);
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_D_P1, 3000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_D_P2, 3000);
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_D_P3, 3000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 2: /* 步进 θ1 → 5600（后动，左转 90°） */
-          StepGoTo(ARM_TH1_D_MID_PULSE);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 4000;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 21：键2 A 展开（停在扫码位，不收）---------- */
-    case 21:
-      switch (g_cal_step)
-      {
-        case 1: /* 展开：大臂 P1 + 小臂 P2 同时（4s） */
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_A_SCAN_P1, 4000);
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_A_SCAN_P2, 4000);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 2000;
-          break;
-        case 2: /* 过 2s 腕状 P3 再动（2s） */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_A_SCAN_P3, 2000);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 2500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    /* ---------- SEQ 22：键2 A 收起（全回 home，严格错峰）---------- */
-    case 22:
-      switch (g_cal_step)
-      {
-        case 1: /* 收起：腕 P3 (2s) + 大臂 P1 (3.5s) 同时 */
-          Servo_SetAngleTime(ARM_TH4_ID, ARM_POSE_HOME_P3, 2000);
-          Servo_SetAngleTime(ARM_TH2_ID, ARM_POSE_HOME_P1, 3500);
-          g_cal_step = 2; g_cal_due_tick = HAL_GetTick() + 1000;
-          break;
-        case 2: /* 过 1s 收小臂 P2（2s） */
-          Servo_SetAngleTime(ARM_TH3_ID, ARM_POSE_HOME_P2, 2000);
-          g_cal_step = 3; g_cal_due_tick = HAL_GetTick() + 2500;
-          break;
-        default:
-          g_cal_seq = 0;
-          break;
-      }
-      break;
-
-    default:
-      g_cal_seq = 0;
-      break;
-  }
-}
 
 /* USER CODE END 4 */
 
@@ -1625,13 +889,7 @@ void StartMainTask(void *argument)
    *   键 9 → 读实时转速（0x35）
    * 原「路径测试按键」已注释（#if 0），需要时恢复。
    * ====================================================================== */
-  g_step_ret = -1;
-  g_step_fw  = 0;
-  g_step_hw  = 0;
-  g_step_tx_cnt = 0;
-  g_step_disp_mode = 0;
-  g_step_ver_ret = -1;
-  g_step_val_ret = -1;
+  /* （2026-10-13：此处原有一串「步进测试桩」全局的初始化，那些变量全部无读者，已随声明一并清掉。） */
 
   TickType_t last_wake = xTaskGetTickCount();
   /* Infinite loop */
@@ -1640,8 +898,11 @@ void StartMainTask(void *argument)
     /* ===== 决策层：路径状态机 tick（原 AAATask） ===== */
     PathRunner_Tick();
 
-    /* ===== 正式模式 Supervisor：任务动作状态机 ===== */
-    Formal_Tick();
+    /* ===== 任务序列引擎：到点后跑该点的动作表（取代旧 formal_mode.c） ===== */
+    Task_Tick();
+
+    /* ===== Host 层周期驱动：主动播发心跳（协议 §3.1，MCU 为心跳主动方） ===== */
+    Host_Tick();
 
     /* ===== Host 2.0 上下位机通信解析：消费已完整收到的帧 ===== */
     CommunicateToHost();
@@ -1651,174 +912,16 @@ void StartMainTask(void *argument)
       parsed_flag = 0;
     }
 
-    /* ===== 视觉通信业务层周期驱动：超时重发 / 位姿上报节拍 ===== */
+    /* ===== 视觉通信业务层周期驱动：超时重发 ===== */
     Vision_Tick();
 
-    /* ==================================================================
-     * 【正式模式 / 标定阶段键位】（2026-10-13 终版）
-     *   键 1 = A 姿态 展开⇄收起 toggle
-     *   键 2 = 走车到 A → 自动展开；再按 2 或收 0x11 → 收起
-     *   键 3 = 清空
-     *   键 4 = 夹爪 开启⇄关闭 toggle（45° 开 / 135° 回位）
-     *   键 5 = 夹爪 抓取 95°
-     *   键 6 = 清空
-     *   键 7 = B 展开（SEQ18）  键 8 = C 展开（SEQ19）  键 9 = D 展开（SEQ20）
-     * ================================================================== */
-    if (Key_Check(KEY_TO_A, KEY_DOWN))   /* 键 1：A 扫码姿态 toggle（展开⇄收起） */
-    {
-      if (g_a_expanded)
-      {
-        Cal_Start(22);   /* 收起 */
-        g_a_expanded = 0;
-      }
-      else
-      {
-        Cal_Start(21);   /* 展开 */
-        g_a_expanded = 1;
-      }
-    }
-    if (Key_Check(KEY_TO_B, KEY_DOWN))   /* 键 2：走车到 A → 自动展开；再按2或收 0x11 → 收起 */
-    {
-      if (!Formal_IsBusy())
-      {
-        Formal_Start(FORMAL_END_AFTER_A);
-      }
-      else
-      {
-        /* 二次按下：若正在 A 扫码阶段等待 0x11，则强制收起 */
-        Formal_ForceTaskRetract();
-      }
-    }
-    /* 键 3：清空（暂不绑定） */
-    if (Key_Check(KEY_GO_A, KEY_DOWN))   /* 键 4：夹爪 开启⇄关闭 toggle（45° 开 / 135° 回位） */
-    {
-      if (g_grip_open)
-      {
-        PWM_Servo_SetAngle(ARM_GRIP_PARK_DEG);   /* 回位 135° */
-        g_grip_open = 0;
-      }
-      else
-      {
-        PWM_Servo_SetAngle(ARM_GRIP_OPEN_DEG);   /* 张开 45° */
-        g_grip_open = 1;
-      }
-    }
-    if (Key_Check(KEY_FWD, KEY_DOWN))    /* 键 5：夹爪 抓取 95° */
-    {
-      PWM_Servo_SetAngle(ARM_GRIP_CLOSE_DEG);
-      g_grip_open = 0;
-    }
-    if (Key_Check(KEY_TO_D, KEY_DOWN))   /* 键 7：B 展开（单独） */
-    {
-      Cal_Start(18);
-    }
-    if (Key_Check(KEY_CALIB, KEY_DOWN))  /* 键 9：D 展开（单独） */
-    {
-      Cal_Start(20);
-    }
+    /* ===== 末端位姿上报（0x14，协议 §3.1d）：10Hz 主动上报 TCP 位置 =====
+     * ⚠️ 暂时【不启用】。它依赖 arm_fk，而 FK 有两个已知缺口 —— ARM_L23_OFFSET_MM(20mm)
+     *    与关节零位角都没参与解算（arm_config.h 有值、arm_kinematics.c 未用），报出去是
+     *    "看着像姿态但不准"的数，比不发更危险（现场会照着它判断机械臂状态）。
+     *    等 FK 补齐后再打开。依据见 26-GX-upper/docs/2026-10-13_接口对齐记录.md §4 第 2 条。 */
+    /* ReportPoseTick(); */
 
-    /* 标定序列推进：当前步延时到期后执行下一步 */
-    if (g_cal_seq != 0 && ((int32_t)(HAL_GetTick() - g_cal_due_tick) >= 0))
-    {
-      Cal_RunStep();
-    }
-
-    /* 键 6：清空（暂不绑定） */
-
-    /* 键 8：C 展开（θ1 左转 + P3 平伸） */
-    if (Key_Check(KEY_TO_END, KEY_DOWN))   /* 键 8：C 展开 */
-    {
-      Cal_Start(19);
-    }
-
-    /* ==================== 启动前摇推进 ====================
-     * phase 1：等 2s → 陀螺仪校准；phase 2：等 1s → 启动 path_runner。 */
-    if (g_start_phase != 0 && ((int32_t)(HAL_GetTick() - g_start_due_tick) >= 0))
-    {
-      if (g_start_phase == 1)
-      {
-        Car_YawCalibrate();               /* 2s 到：陀螺仪校准 */
-        g_start_phase = 2;
-        g_start_due_tick = HAL_GetTick() + 1000;
-      }
-      else /* phase 2 */
-      {
-        g_start_phase = 0;
-        PathRunner_Start();               /* 1s 到：车开始动 */
-      }
-    }
-
-    /* ==================== 自动演示调度（底盘测试阶段：禁用自动串链） ====================
-     * 1) 到达任务点（RUN_ST_TASK）且臂链空闲 → 触发该点臂序列链；
-     * 2) 某个臂序列刚结束（g_cal_seq==0）→ 串链推进 / 链尾回喂 TaskDone。
-     * 底盘路径测试阶段：键 1/2 直接 PathRunner_Goto，定位到点即停（RUN_ST_TASK），
-     * 不自动串臂链，故此处整块注释。
-     * ======================================================= */
-#if 0
-    if (g_cal_seq == 0)
-    {
-      if (g_chain_last != 0)
-      {
-        Chain_Tick();          /* 刚结束一段：串下一段或完成任务 */
-      }
-      else if (g_run_state == RUN_ST_TASK)
-      {
-        Chain_StartTask(g_target_idx);   /* 到任务点：启动对应臂链 */
-      }
-    }
-#endif
-
-#if 0
-    /* ===== 步进×舵机 姿态测试（临时注释） ===== */
-    if (Key_Check(KEY_TO_A, KEY_DOWN))   /* 键 1：回初始位 */
-    {
-      g_servo_time = 3000;
-      g_servo_cmd = 1;
-      g_servo_pose = 0;   /* 收起：位置环不动作 */
-      Servo_SendGroup("#001P2137T3000!#002P1776T3000!");
-      /* 更新位置环目标到初始位 */
-      g_servo_target1 = 2137;
-      g_servo_target2 = 1776;
-      g_servo_cmd1 = 2137;
-      g_servo_cmd2 = 1776;
-      g_servo_move_done_tick = HAL_GetTick() + 3000;   /* 3s 平滑运动期结束 */
-      /* 步进反向转回累计量（左转累计为正 → 反向 CCW） */
-      if (g_step_accum_pulses != 0)
-      {
-        uint32_t back = (g_step_accum_pulses > 0) ? (uint32_t)g_step_accum_pulses
-                                                  : (uint32_t)(-g_step_accum_pulses);
-        Arm_MoveRelative(back, ARM_DIR_CCW);
-        g_step_accum_pulses = 0;
-      }
-    }
-    if (Key_Check(KEY_TO_B, KEY_DOWN))   /* 键 2：A 展开（仅舵机，开环固定命令，无 PID） */
-    {
-      g_servo_time = 3000;
-      g_servo_cmd = 2;
-      g_servo_pose = 1;   /* A 展开：开环，位置环跳过 */
-      Servo_SendGroup("#001P0699T3000!#002P0500T3000!");
-      g_servo_target1 = 699;
-      g_servo_target2 = 500;
-      g_servo_cmd1 = 699;
-      g_servo_cmd2 = 500;
-      g_servo_move_done_tick = HAL_GetTick() + 3000;
-    }
-    if (Key_Check(KEY_TO_C, KEY_DOWN))   /* 键 3：B 展开（先舵机展开，2s 后步进左转 90°，PID 闭环） */
-    {
-      g_servo_time = 3000;
-      g_servo_cmd = 3;
-      g_servo_pose = 2;   /* B 展开：位置环 PID 闭环 */
-      Servo_SendGroup("#001P1400T5000!#002P0800T5000!");
-      g_servo_target1 = 1400;
-      g_servo_target2 = 800;
-      g_servo_cmd1 = 1400;
-      g_servo_cmd2 = 800;
-      g_servo_move_done_tick = HAL_GetTick() + 5000;   /* B 展开 T5000 */
-      /* 步进延后触发：记录 3.5s 后的时刻，到点再左转 */
-      g_b_step_armed = 1;
-      g_b_step_due_tick = HAL_GetTick() + 3500;
-    }
-#endif
 
     /* ==================================================================
      * 【三舵机位置采样】固定周期轮询（防半双工总线串扰乱码）
@@ -1841,15 +944,11 @@ void StartMainTask(void *argument)
       g_servo_lastsend_tick = HAL_GetTick();
     }
 
-    /* 回读处理：位置 → 存变量 + 就地纠偏；ID 应答 → 存 g_servo_id。
+    /* 回读处理：位置 → 存变量 + 就地纠偏。
      * 用 while 一次清空队列（可能积压多条回包）。 */
     while (Servo_HasReply())
     {
       servo_reply_t r = Servo_GetReply();
-      if (r.kind == SERVO_REPLY_ID)
-      {
-        g_servo_id = r.id;   /* 存回应的 ID，供 OLED 显示「当前 ID」 */
-      }
       if (r.kind == SERVO_REPLY_POSITION)
       {
         if (r.id == 1)
@@ -1871,64 +970,9 @@ void StartMainTask(void *argument)
         /* ===== 外环位置环（已停用 2026-10-07：只显示 P123 不闭环） =====
          * 姿态调试阶段仅开环下发固定 PWM，位置环不纠偏。
          * 需要闭环时取消下方 #if 0 包裏并同步更新 g_servo_target1/2。 */
-#if 0
-        uint8_t cooled = ((int32_t)(HAL_GetTick() - g_servo_move_done_tick) >= 0);
-        if (cooled && g_servo_pose == 2)
-        {
-          if (r.id == 1 && g_servo_target1 > 0)
-          {
-            int32_t e = (int32_t)g_servo_target1 - (int32_t)r.pwm;
-            g_pid_err1 = (int16_t)e;
-            if (e > SERVO_PID_DEADBAND || e < -SERVO_PID_DEADBAND)
-            {
-              int32_t nc = (int32_t)g_servo_cmd1 + ((e * SERVO_PID_KP_X10) / 10);
-              if (nc > SERVO_PWM_MAX) nc = SERVO_PWM_MAX;
-              if (nc < SERVO_PWM_MIN) nc = SERVO_PWM_MIN;
-              g_servo_cmd1 = (int16_t)nc;
-              Servo_SetAngleTime(1, (uint16_t)nc, 50);
-              g_pid_act1++;
-            }
-          }
-          if (r.id == 2 && g_servo_target2 > 0)
-          {
-            int32_t e = (int32_t)g_servo_target2 - (int32_t)r.pwm;
-            g_pid_err2 = (int16_t)e;
-            if (e > SERVO_PID_DEADBAND || e < -SERVO_PID_DEADBAND)
-            {
-              int32_t nc = (int32_t)g_servo_cmd2 + ((e * SERVO_PID_KP_X10) / 10);
-              if (nc > SERVO_PWM_MAX) nc = SERVO_PWM_MAX;
-              if (nc < SERVO_PWM_MIN) nc = SERVO_PWM_MIN;
-              g_servo_cmd2 = (int16_t)nc;
-              Servo_SetAngleTime(2, (uint16_t)nc, 50);
-              g_pid_act2++;
-            }
-          }
-        }
-#endif
       }
     }
 
-#if 0
-    /* ==================== 原路径测试：按键触发（分段测试） ==================== */
-    /* 键1→去A  键2→去B  键3→去C
-     * 键7→去D  键8→去终点
-     * 键9→陀螺仪校准
-     * 注：用 KEY_DOWN（按下沿），与按键测试同源更可靠。
-     * 除正在 MOVING 外，任意状态均可直接跳转（IDLE/TASK/DONE 都能重新导向）。 */
-    if (Key_Check(KEY_CALIB, KEY_DOWN))
-    {
-      Car_YawCalibrate();
-    }
-
-    if (g_run_state != RUN_ST_MOVING)
-    {
-      if (Key_Check(KEY_TO_A, KEY_DOWN))   { PathRunner_Goto(0); }
-      if (Key_Check(KEY_TO_B, KEY_DOWN))   { PathRunner_Goto(1); }
-      if (Key_Check(KEY_TO_C, KEY_DOWN))   { PathRunner_Goto(2); }
-      if (Key_Check(KEY_TO_D, KEY_DOWN))   { PathRunner_Goto(3); }
-      if (Key_Check(KEY_TO_END, KEY_DOWN)) { PathRunner_Goto(4); }
-    }
-#endif
 
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(5));
   }
@@ -2038,35 +1082,18 @@ void StartRunTask(void *argument)
 void StartOLEDTask(void *argument)
 {
   /* USER CODE BEGIN StartOLEDTask */
-  OLED_Init();
+  /* 显示层已换成 u8g2 + MUI 表单（src/ui_form.c / src/u8g2_port.c）——
+   * 取代原来的「4 行文本 + 9 键各绑一功能 + 22 个标定序列」。
+   * 键盘也归本任务消费（原先 TickTask 采样、MainTask 消费，两个任务读同一份
+   * Key_Flag 本来就存在竞态）。 */
+  Ui_Init();
 
-  /* ========================================================================
-   * 三舵机位置标定 OLED：行1/2/3 = P1/P2/P3 实时读回 PWM。
-   *   数据源：g_servo_pwm1/2/3（主循环 50ms 轮询 Servo_ReadAngle 读回）。
-   * ====================================================================== */
   for(;;)
   {
-    OLED_ShowString(1, 1, "P1 ");
-    OLED_ShowNum(1, 4, g_servo_pwm1, 4);
-
-    OLED_ShowString(2, 1, "P2 ");
-    OLED_ShowNum(2, 4, g_servo_pwm2, 4);
-
-    OLED_ShowString(3, 1, "P3 ");
-    OLED_ShowNum(3, 4, g_servo_pwm3, 4);
-
-    OLED_ShowString(4, 1, "        ");
-
-    osDelay(50);
+    Ui_Tick();          /* 读键盘 → 喂 MUI → 需要时重画 */
+    osDelay(20);        /* 50ms → 20ms：按键响应更跟手，I2C 只在重画时才写 */
   }
 
-#if 0
-  /* ==================== OLED 调试菜单（已禁用 2026-10-12） ====================
-   * 需要时恢复：
-   *   Menu_Enter();
-   *   for(;;){ if(!Menu_IsActive()) Menu_Enter(); Menu_Tick(); osDelay(10); }
-   * ====================================================================== */
-#endif
   /* USER CODE END StartOLEDTask */
 }
 

@@ -646,6 +646,14 @@ uint8_t Arc_IsActive(void)
     return arc_active;
 }
 
+/* 底盘是否彻底静止：五种运动（直行/弧线/原地转/减速扫描/倒车）全都不在跑。
+ * 执行层用它取代「发一条路径段 + 睡固定时间」。 */
+uint8_t Car_IsStopped(void)
+{
+    return (uint8_t)(!Go_IsActive() && !Arc_IsActive() && !Turn_IsActive() &&
+                     !Scan_IsActive() && !Back_IsActive());
+}
+
 /* ==================== I. 编码器累计 ==================== */
 
 void Encoder_Total_Counter(int32_t enc_l, int32_t enc_r)

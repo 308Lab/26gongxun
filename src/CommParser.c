@@ -9,10 +9,18 @@ uint8_t parsed_flag;        // 解析完成标志位
 
 /* ==================== 应答与动作辅助 ==================== */
 
-/* 心跳：收到 0xFE 回 0xFE（协议 §3.1 双向对称） */
+/* 心跳（协议 §3.1，2026-10-13 修订）：**收到不回**。
+ *
+ * 主动方是 MCU —— Host_Tick() 每 200ms 主动发一帧 0xFE；视觉收到会回一帧。
+ * MCU 收到的 0xFE 必然是视觉对自己刚才那帧的**回声**，再回就无限对打
+ * （实测：心跳帧瞬间淹没所有任务帧，0x21 连一次都挤不进去）。
+ *
+ * 注意：心跳【不刷新业务超时】—— Vision 层的 last_recv_tick 只由业务回包
+ * （0x21/0x23/0x26/0x31/0x33/0x41/0x43）刷新。否则视觉业务线程卡死但心跳还在回时，
+ * §2.5 的兜底永远不会触发。 */
 static void HandleHeartbeat(void)
 {
-    Transmit_Heartbeat();
+    /* 有意留空：见上。 */
 }
 
 /* ==================== 指令解析函数 ==================== */
@@ -67,14 +75,15 @@ void CMD_Parse(serial_frame_t *frame)
                 Transmit_Ack(HOST_CMD_A_RET_3);
             break;
 
+        /* ★ 流式坐标帧（0x23/0x26/0x33/0x43）**不回 ACK**（协议 §2.1，2026-10-13 明确）：
+         *   它们是 10~100Hz 的高频数据流，不是指令。逐帧回 ACK 会在 115200 上把回程
+         *   带宽持续占住，而闭环判到位靠坐标本身，ACK 没有任何作用。 */
         case HOST_CMD_A_TRACK_POS:    /* 0x23 流式单目标（LEN=6） */
-            if (Vision_OnSingleTarget(frame->data, frame->len) == 0)
-                Transmit_Ack(HOST_CMD_A_TRACK_POS);
+            Vision_OnSingleTarget(frame->data, frame->len);
             break;
 
         case HOST_CMD_A_PLACE_POS:    /* 0x26 流式排爆桶（LEN=6） */
-            if (Vision_OnSingleTarget(frame->data, frame->len) == 0)
-                Transmit_Ack(HOST_CMD_A_PLACE_POS);
+            Vision_OnSingleTarget(frame->data, frame->len);
             break;
 
         /* ================= 反恐系列（0x3x）================= */
@@ -83,9 +92,8 @@ void CMD_Parse(serial_frame_t *frame)
                 Transmit_Ack(HOST_CMD_B_RET_3);
             break;
 
-        case HOST_CMD_B_TRACK_POS:    /* 0x33 流式单目标（LEN=6） */
-            if (Vision_OnSingleTarget(frame->data, frame->len) == 0)
-                Transmit_Ack(HOST_CMD_B_TRACK_POS);
+        case HOST_CMD_B_TRACK_POS:    /* 0x33 流式单目标（LEN=6），不回 ACK（见上） */
+            Vision_OnSingleTarget(frame->data, frame->len);
             break;
 
         case HOST_CMD_B_TARGET_DOWN:  /* 0x35 目标倒下（LEN=0） */
@@ -99,9 +107,8 @@ void CMD_Parse(serial_frame_t *frame)
                 Transmit_Ack(HOST_CMD_C_RET_3);
             break;
 
-        case HOST_CMD_C_TRACK_POS:    /* 0x43 流式单目标（LEN=6） */
-            if (Vision_OnSingleTarget(frame->data, frame->len) == 0)
-                Transmit_Ack(HOST_CMD_C_TRACK_POS);
+        case HOST_CMD_C_TRACK_POS:    /* 0x43 流式单目标（LEN=6），不回 ACK（见上） */
+            Vision_OnSingleTarget(frame->data, frame->len);
             break;
 
         /* ================= 心跳 / 应答 ================= */

@@ -53,7 +53,8 @@ int8_t Vision_OnThreeTarget(const uint8_t *data, uint8_t len)
     g_vision.obs3.target_id = *p;   /* 1左/2中/3右 */
     g_vision.obs3.valid = 1;
 
-    /* 观察回包 = 阶段一结束，重置重发/丢失计数 */
+    /* 观察回包 = 阶段一结束，退出等待态并重置重发/丢失计数 */
+    g_vision.track_state = V_TRACK_IDLE;
     g_vision.retry_cnt = 0;
     g_vision.lost_cnt  = 0;
     g_vision.last_recv_tick = HAL_GetTick();
@@ -80,19 +81,21 @@ int8_t Vision_OnSingleTarget(const uint8_t *data, uint8_t len)
     return 0;
 }
 
-/* 识别错误（0x12）：错误码仅记录，动作停摆待任务层处理 */
+/* 识别错误（0x12）：记录错误码（协议 §3.1b 错误码表），停摆交给任务层兜底。
+ * 视觉报错后回空闲态；重试权在 MCU（协议 §2.2），视觉不自己重试。 */
 void Vision_OnIdentErr(uint8_t err_code)
 {
-    (void)err_code;
+    g_vision.last_err_code = err_code;
+    g_vision.err_cnt++;
     g_vision.track_state = V_TRACK_IDLE;
-    /* TODO: 记录错误码供 OLED/上位机查询；当前占位 */
 }
 
 /* 目标丢失（0x13）：进入视野丢失兜底（不关机，计数由任务层消费） */
 void Vision_OnTargetLost(void)
 {
     g_vision.lost_cnt++;
-    g_vision.track_state = V_TRACK_IDLE;
+    g_vision.track_state = V_TRACK_IDLE;   /* 本轮结束：不再超时重发，等任务层兜底 */
+    g_vision.retry_cnt   = 0;              /* 计数一并归零，下一轮从零起 */
     /* 兑现动作（抬大臂+回上一帧 PWM / 连续 5 次回展开态）由 formal_mode 任务层执行 */
 }
 
@@ -109,11 +112,12 @@ uint8_t Vision_ConsumeScanDone(void)
     return d;
 }
 
-/* 反恐目标倒下（0x35）：关激光 */
+/* 反恐目标倒下（0x35）：置事件标志，由任务层关激光（协议 §3.4）。
+ * 激光是任务资源不是通信资源，这层只落事件。 */
 void Vision_OnTargetDown(void)
 {
-    g_vision.track_state = V_TRACK_IDLE;
-    /* TODO: 关闭激光（激光外设 GPIO/TIM 尚未接入）；当前占位 */
+    g_vision.target_down  = 1;   /* 任务层消费后清 0 */
+    g_vision.track_state  = V_TRACK_IDLE;
 }
 
 /* ============================================================
@@ -125,7 +129,8 @@ void Vision_ReqScan(void)
     Transmit_ReqScan();
 }
 
-void Vision_ObsThree(vision_series_t series)
+/* 按系列发「观察三物体」帧（0x20/0x30/0x40） */
+static void Vision_SendObs3(vision_series_t series)
 {
     switch (series)
     {
@@ -134,25 +139,48 @@ void Vision_ObsThree(vision_series_t series)
         case VISION_SERIES_C: Transmit_ObsThree(HOST_CMD_C_OBS_3);   break;
         default: break;
     }
-    g_vision.series = series;
+}
+
+/* 开始【新一轮】观察（任务层调用）：重置重发计数并进入阶段1等待态。
+ * ★ 早先这里没设 track_state —— 观察段于是没有任何超时/重发，视觉丢一帧就永久卡死。 */
+void Vision_ObsThree(vision_series_t series)
+{
+    Vision_SendObs3(series);
+    g_vision.series       = series;
+    g_vision.retry_cnt    = 0;
+    g_vision.track_state  = V_TRACK_WAIT_OBS3;
+    g_vision.last_recv_tick = HAL_GetTick();
+}
+
+/* 超时【重发】观察命令：不动 retry_cnt、不改状态，只重发 + 重置计时。
+ * （与 Vision_ReTrack 同构：重发若走 Vision_ObsThree，计数会被清零 → 无限重发。） */
+static void Vision_ReObs3(void)
+{
+    Vision_SendObs3(g_vision.series);
     g_vision.last_recv_tick = HAL_GetTick();
 }
 
 void Vision_TrackBegin(vision_series_t series, uint16_t rate_hz)
 {
+    uint8_t cmd;
+
     if (rate_hz == 0)
         rate_hz = VISION_DEFAULT_RATE_HZ;
 
     switch (series)
     {
-        case VISION_SERIES_A: Transmit_TrackBegin(HOST_CMD_A_TRACK_BEGIN, rate_hz); break;
-        case VISION_SERIES_B: Transmit_TrackBegin(HOST_CMD_B_TRACK_BEGIN, rate_hz); break;
-        case VISION_SERIES_C: Transmit_TrackBegin(HOST_CMD_C_TRACK_BEGIN, rate_hz); break;
-        default: break;
+        case VISION_SERIES_A: cmd = HOST_CMD_A_TRACK_BEGIN; break;
+        case VISION_SERIES_B: cmd = HOST_CMD_B_TRACK_BEGIN; break;
+        case VISION_SERIES_C: cmd = HOST_CMD_C_TRACK_BEGIN; break;
+        default: return;   /* 未知系列：不发也不改状态 */
     }
-    g_vision.series       = series;
+    Transmit_TrackBegin(cmd, rate_hz);
+
+    g_vision.series        = series;
     g_vision.track_rate_hz = rate_hz;
-    g_vision.track_state  = V_TRACK_RUNNING;
+    g_vision.track_cmd     = cmd;              /* 超时重发要原样再发这一条 */
+    g_vision.retry_cnt     = 0;                /* 新一轮：重发计数从零起 */
+    g_vision.track_state   = V_TRACK_RUNNING;
     g_vision.last_recv_tick = HAL_GetTick();
 }
 
@@ -178,6 +206,8 @@ void Vision_PlaceBegin(uint16_t rate_hz)
     Transmit_TrackBegin(HOST_CMD_A_PLACE_BEGIN, rate_hz);
     g_vision.series        = VISION_SERIES_A;
     g_vision.track_rate_hz = rate_hz;
+    g_vision.track_cmd     = HOST_CMD_A_PLACE_BEGIN;   /* 超时重发要原样再发 0x25 */
+    g_vision.retry_cnt     = 0;
     g_vision.track_state   = V_TRACK_RUNNING;
     g_vision.last_recv_tick = HAL_GetTick();
 }
@@ -202,33 +232,50 @@ void Vision_ReportPose(int16_t x_mm, int16_t y_mm, int16_t z_mm)
 /* ============================================================
  * 周期驱动：视觉超时重发 + 位姿上报节拍
  * ============================================================ */
+
+/* 重发「开始追踪」命令（协议 §2.5：追踪段超时重发的是它本身，不是「观察三物体」）。
+ *
+ * ★ 有意【不走】 Vision_TrackBegin/Vision_PlaceBegin：那两个是「开始新一轮」，
+ *   会把 retry_cnt 清零；重发路径若清零，就成了无限重发、永不判丢失。
+ *   这里只做两件事：原样再发一帧 + 重置计时（不重置计时则下一个 tick 立刻再发 → 忙循环）。 */
+static void Vision_ReTrack(void)
+{
+    Transmit_TrackBegin(g_vision.track_cmd, g_vision.track_rate_hz);
+    g_vision.last_recv_tick = HAL_GetTick();
+}
+
+/* 阶段1（观察三物体）与阶段2（追踪）共用同一套「超时 → 重发 ×3 → 判出视野」框架，
+ * 区别只在重发的是哪条命令。协议 §2.5 对这两段的超时都要兜底：
+ *   - 阶段1：仅「收不到就重发」，不套用抬臂回退；
+ *   - 阶段2：重发耗尽后由任务层兑现「抬大臂 + 回上一帧位姿 / 回展开态」。 */
 void Vision_Tick(void)
 {
     uint32_t now = HAL_GetTick();
+    uint32_t age = (uint32_t)(now - g_vision.last_recv_tick);
+    uint8_t  waiting = (g_vision.track_state == V_TRACK_WAIT_OBS3) ||
+                       (g_vision.track_state == V_TRACK_RUNNING);
 
-    /* 追踪中：连续超时无坐标下传 → 视为目标丢失，进入兜底（§2.5） */
-    if (g_vision.track_state == V_TRACK_RUNNING)
+    if (waiting && age >= VISION_TIMEOUT_MS)
     {
-        if ((int32_t)(now - g_vision.last_recv_tick) >= VISION_TIMEOUT_MS)
+        if (g_vision.retry_cnt < VISION_RETRY_MAX)
         {
-            /* 观察单目标超时：重发观察命令 ×3 */
-            if (g_vision.retry_cnt < VISION_RETRY_MAX)
-            {
-                g_vision.retry_cnt++;
-                Vision_ObsThree(g_vision.series);
-            }
+            g_vision.retry_cnt++;
+            if (g_vision.track_state == V_TRACK_WAIT_OBS3)
+                Vision_ReObs3();                    /* 重发 0x20/0x30/0x40 */
             else
-            {
-                /* 重发耗尽 → 判定目标出视野（永不停机：只计数，任务层兑现抬大臂/回展开态） */
-                g_vision.lost_cnt++;
-                g_vision.track_state = V_TRACK_IDLE;
-                g_vision.retry_cnt = 0;
-            }
+                Vision_ReTrack();                   /* 重发 0x22/0x25/0x32/0x42 */
+        }
+        else
+        {
+            /* 重发耗尽 → 计入一次「出视野」（永不停机：只计数，任务层兑现兜底动作） */
+            g_vision.lost_cnt++;
+            g_vision.track_state = V_TRACK_IDLE;
+            g_vision.retry_cnt = 0;
         }
     }
 
-    /* 位姿上报节拍：任务层接入 FK 后，此处周期性解算 TCP 并上报。
-     * 当前 FK 未接入，占位：不主动上报（避免发假坐标）。 */
-    (void)now;
+    /* 位姿上报（0x14）的节拍与 FK 解算在 main.c 的 ReportPoseTick() 里 ——
+     * 它要用 θ1 软累加器与舵机实测 PWM，那两个都是 main.c 的状态，不属于通信层。
+     * 本层只提供 Vision_ReportPose() 这个发送入口。 */
     (void)g_vision.pose_tick;
 }

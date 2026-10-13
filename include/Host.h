@@ -127,6 +127,11 @@ extern uint8_t         rx_byte_cache;   // USART3 逐字节接收缓存（定义
 /* ==================== 函数声明 ==================== */
 
 void Host_Init(void);
+
+/* 周期驱动：主动播发心跳（协议 §3.1，MCU 是心跳的主动方，200ms/帧）。
+ * 放主循环里每 tick 调一次。 */
+void Host_Tick(void);
+
 uint8_t serial_calc_xor(uint8_t cmd, uint8_t len, uint8_t *data);
 uint8_t serial_check_xor(serial_frame_t *frame);
 void serial_receive_byte(uint8_t byte, serial_frame_t *frame,

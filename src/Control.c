@@ -6,7 +6,8 @@ void Control_Init (void)
     
     Car_Control_Init();
     Host_Init();
-    OLED_Init();
+    /* 显示不在这里初始化：OLEDTask 会调 Ui_Init()（u8g2+MUI，同一组 PB8/PB9 软件 I2C）。
+     * 原先这里还有一行 OLED_Init()，两套驱动会抢同一组引脚，已移除。 */
     Encoder_Init();
     Gyro_Init(&huart2);   /* JY61P 接 USART2（PA3=RX） */
     Servo_UartInit();

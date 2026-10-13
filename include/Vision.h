@@ -34,6 +34,18 @@ extern "C" {
  * ============================================================ */
 #define VISION_3TARGET_N  3   /* 左/中/右 三目标 */
 
+/* ============================================================
+ * 识别错误码（0x12 的 DATA[0]，协议 §3.1b 错误码表，与上位机共用）
+ * 视觉报错后回空闲态，重试权在 MCU（协议 §2.2）。
+ * ============================================================ */
+#define VISION_ERR_NONE               0x00  /* 保留：不要当成有效错误码 */
+#define VISION_ERR_QR_BAD_PAYLOAD     0x01  /* 码扫到了，但内容不是合法三位数 */
+#define VISION_ERR_CALIB_MISSING      0x02  /* 标定/手眼变换缺失或与分辨率不匹配 */
+#define VISION_ERR_DETECTOR_NOT_READY 0x03  /* 本任务/本阶段的检测器未就绪 */
+#define VISION_ERR_TARGET_NOT_THREE   0x04  /* 检出目标数 != 3，定不了左/中/右 */
+#define VISION_ERR_TRACK_TIMEOUT      0x05  /* 追踪段达到最大时长（§3.1c，60s） */
+#define VISION_ERR_DEPTH_INVALID      0x06  /* 目标深度无效或超出有效测距范围 */
+
 /* 单目标坐标（mm，int16） */
 typedef struct {
     int16_t x;
@@ -62,9 +74,10 @@ typedef enum {
  * 流式追踪状态（MCU 主控）
  * ============================================================ */
 typedef enum {
-    V_TRACK_IDLE = 0,    /* 未追踪 */
-    V_TRACK_RUNNING,     /* 追踪中（持续接收坐标） */
-    V_TRACK_WAIT_STOP,   /* 判到位，已发停止追踪，等视觉停流 */
+    V_TRACK_IDLE = 0,      /* 空闲：未观察、未追踪 */
+    V_TRACK_WAIT_OBS3,     /* 阶段1：已发「观察三物体」，等三目标回包（协议 §2.5 阶段1） */
+    V_TRACK_RUNNING,       /* 阶段2：追踪中，持续接收流式坐标 */
+    V_TRACK_WAIT_STOP,     /* 已发「停止追踪」，等视觉停流 */
 } vision_track_state_t;
 
 /* ============================================================
@@ -77,10 +90,14 @@ typedef struct {
     vision_xyz_t         last_pos;         /* 最近一次流式单目标坐标 */
     uint8_t              last_pos_valid;   /* last_pos 是否有新值 */
     uint16_t             track_rate_hz;    /* 当前追踪控制周期（Hz） */
+    uint8_t              track_cmd;        /* 当前追踪命令码（0x22/0x25/0x32/0x42），超时重发用它 */
     uint32_t             last_recv_tick;   /* 最近一次收到视觉回包的 tick（超时判据） */
 
     /* 扫码完成（0x11）事件标志：Vision_OnScanDone 置 1，任务层消费后清 0 */
     uint8_t              scan_done;        /* 1=收到扫码完成 */
+
+    /* 反恐目标倒下（0x35）事件标志：Vision_OnTargetDown 置 1，任务层开激光后消费 */
+    uint8_t              target_down;      /* 1=视觉判靶已倒下（协议 §3.4） */
 
     /* 视野丢失兜底计数（2026-10-13 定案：连续 5 次→回展开态，永不停机） */
     uint8_t              retry_cnt;        /* 当前观察单目标的重发次数（<3） */
@@ -88,6 +105,10 @@ typedef struct {
 
     /* 位姿上报（0x14）定时节拍 */
     uint32_t             pose_tick;        /* 上次上报 tick */
+
+    /* 识别错误（0x12）记录：码值留档供 OLED/调试定位，动作停摆由任务层兜底 */
+    uint8_t              last_err_code;    /* 最近一次错误码（0=无，见 VISION_ERR_*） */
+    uint16_t             err_cnt;          /* 累计收到的错误帧数 */
 } vision_state_t;
 
 extern vision_state_t g_vision;
@@ -111,7 +132,7 @@ void Vision_OnTargetLost(void);
 /* 扫码完成（0x11）落地 */
 void Vision_OnScanDone(void);
 
-/* 反恐目标倒下（0x35）落地：关闭激光（动作占位） */
+/* 反恐目标倒下（0x35）落地：置 target_down 事件标志，任务层据此关激光（协议 §3.4） */
 void Vision_OnTargetDown(void);
 
 /* ============================================================
@@ -127,7 +148,12 @@ void Vision_PlaceStop(void);                       /* 0x27 停止追踪（排爆
 
 /* ============================================================
  * 周期驱动（放逐帧 tick 处）：视觉超时重发 / 位姿上报节拍
- * ============================================================ */
+ *
+ * 覆盖协议 §2.5 的两个阶段，行为一致但重发的命令不同：
+ *   阶段1 观察三物体（V_TRACK_WAIT_OBS3）→ 重发 0x20/0x30/0x40；
+ *   阶段2 追踪（V_TRACK_RUNNING）        → 重发 0x22/0x25/0x32/0x42。
+ * 统一节奏：500ms 无回包 → 重发本阶段命令 ×3 → 仍无 → lost_cnt++ 并回 IDLE
+ * （由 formal_mode 任务层兑现兜底动作）。 */
 void Vision_Tick(void);
 
 /* 位姿上报（0x14）落地点：由任务层调 FK 解算 TCP 后写入 xyz 上报。

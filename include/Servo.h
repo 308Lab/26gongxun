@@ -53,6 +53,10 @@ extern "C" {
 
 #define SERVO_RX_BUF_SIZE     64              /* 回读接收缓存 */
 
+/* 按 ID 缓存最近位置读回值的容量（缓存 1..SERVO_POS_CACHE_N-1 号）。
+ * 本工程只用到 1/2/3 号，给到 8 留余量。 */
+#define SERVO_POS_CACHE_N     8
+
 /* ==================== 半双工方向 ==================== */
 
 typedef enum {
@@ -115,6 +119,19 @@ void Servo_Feed(uint8_t byte);            /* 喂入回读字节（由调用方�
 void Servo_Poll(void);                    /* 轮询解析完整应答帧（主循环调用） */
 uint8_t Servo_HasReply(void);             /* 是否有一帧新应答待取 */
 servo_reply_t Servo_GetReply(void);       /* 取出最新解析结果 */
+
+/* ---- 到位查询（执行层用：取代「发命令 + 睡固定时间」）---- */
+
+/**
+ * @brief 舵机 id 是否已到 target_pwm（|读回值 - 目标| <= tol）
+ * @retval 1=到位；0=未到位；-1=该 ID 未缓存或还没读到过位置
+ * @note   读的是 Servo_ReadAngle() 回读并缓存的**实测值**，不是命令值。
+ *         调用前得先让它读过一次（主循环 50ms 轮询已在做）。
+ */
+int Servo_IsReached(uint8_t id, uint16_t target_pwm, uint16_t tol);
+
+/** 最近一次读回的 PWM；0 = 该 ID 还没读到过。给 UI 显示用。 */
+uint16_t Servo_LastPos(uint8_t id);
 
 /* ==================== 外部变量 ==================== */
 extern volatile servo_reply_t servo_last_reply;            /* 最近一次解析结果（跨任务共享，volatile） */

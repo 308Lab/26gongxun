@@ -275,6 +275,17 @@ int Arm_ReadFlags(uint8_t *flags)
     return 0;
 }
 
+int Arm_IsReached(void)
+{
+    uint8_t flags = 0;
+
+    if (Arm_ReadFlags(&flags) != 0)
+    {
+        return -1;
+    }
+    return (flags & ARM_FLAG_REACHED) ? 1 : 0;
+}
+
 /* ============================================================
  * 符号+数值 → 带符号 32 位整数
  * ============================================================ */

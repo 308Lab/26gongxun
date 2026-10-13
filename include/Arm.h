@@ -161,6 +161,17 @@ int32_t Arm_ValueToInt32(const Arm_Value_t *v);
 float Arm_RawToDeg(uint32_t raw);
 
 /**
+ * @brief 电机是否已到达目标位置（读 0x3A 状态标志的 Prf_TF 位）
+ * @retval 1=到位；0=仍在动；-1=查询失败（超时 / 帧错误）
+ * @note   ★ 阻塞式：同步收发一帧，超时 ARM_TIMEOUT_MS。只可用于低速的到位轮询，
+ *         不可放进高实时路径。
+ *         ★ 堵转时 Prf_TF 不会置位 → 会一直返回 0，**调用方必须自带超时兜底**，
+ *         否则一次堵转就是永久卡住。
+ *         执行层用它取代「发命令 + 睡固定时间」。
+ */
+int Arm_IsReached(void);
+
+/**
  * @brief 非阻塞读取驱动器回包原始字节（调试验证回包链路用）
  * @param  out   输出缓冲区（调用方保证足够大，建议 >= ZDT_MAX_RESP_SIZE）
  * @param  max   缓冲区最大长度

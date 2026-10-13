@@ -209,6 +209,32 @@ void Servo_SendGroup(const char *body)
 
 volatile servo_reply_t servo_last_reply;     /* 最近一次解析结果（跨任务共享，须 volatile） */
 
+/* 按 ID 缓存的最近一次位置读回值（PWM）。
+ *
+ * 存在的理由：Servo_IsReached() 要回答"舵机 N 到目标了吗"，而 servo_last_reply 只装着
+ * 【最后一次】解析的那一条 —— 三个舵机轮询时它一直在变，没法回答"某个特定 ID"。
+ * 只缓存 1..SERVO_POS_CACHE_N-1 号（本工程只用到 1/2/3），不铺 256 字节。 */
+static volatile uint16_t s_servo_pos[SERVO_POS_CACHE_N];
+
+int Servo_IsReached(uint8_t id, uint16_t target_pwm, uint16_t tol)
+{
+    uint16_t cur;
+    int32_t  diff;
+
+    if (id == 0 || id >= SERVO_POS_CACHE_N) return -1;  /* 不缓存这个 ID */
+    cur = s_servo_pos[id];
+    if (cur == 0) return -1;                            /* 还没读到过 —— 不能判"到位" */
+
+    diff = (int32_t)cur - (int32_t)target_pwm;
+    if (diff < 0) diff = -diff;
+    return (diff <= (int32_t)tol) ? 1 : 0;
+}
+
+uint16_t Servo_LastPos(uint8_t id)
+{
+    return (id < SERVO_POS_CACHE_N) ? s_servo_pos[id] : 0;
+}
+
 /* 回包环形队列：解决「连发多条读命令时，单标志丢包」问题。
  * 视觉伺服/快速采样场景下，连续发 3 条 PRAD，回包可能在同一 Servo_Poll 周期内
  * 连续到达，单标志会被覆盖丢弃。用队列缓存多个解析结果。 */
@@ -294,6 +320,11 @@ static void parse_reply(char *frame, uint8_t len)
         }
         servo_last_reply.kind = SERVO_REPLY_POSITION;
         servo_last_reply.pwm = val;
+        /* 顺便更新按 ID 的位置缓存 —— Servo_IsReached() 查它。
+         * 用 0 当"尚未读到过"的哨兵是安全的：PWM 有效范围是 500~2500。 */
+        if (servo_last_reply.id < SERVO_POS_CACHE_N) {
+            s_servo_pos[servo_last_reply.id] = val;
+        }
         return;
     }
 
