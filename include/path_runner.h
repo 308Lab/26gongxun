@@ -23,6 +23,8 @@
 #define CMD_GO     1    /* 直行：param = 距离 mm */
 #define CMD_ARC    2    /* 弧线转：dir 用，param = 角度 deg */
 #define CMD_TURN   3    /* 原地转弯：dir 用，param = 角度 deg */
+#define CMD_SCAN   4    /* 减速扫描：param = 距离 mm（慢速通过 + 记录编码器） */
+#define CMD_BCK    5    /* 倒车：param = 距离 mm（反向退到目标区中间） */
 
 /* 命令标志位：AAATask 写，RunTask 读。
  * seq 每次下发新命令 +1，RunTask 据此判断「这条新命令还没执行过」。 */
@@ -35,6 +37,11 @@ typedef struct {
 } RunnerCmd;
 
 extern volatile RunnerCmd g_cmd;
+
+/* 【临时诊断】段完成时的 yaw 快照（OLED 冻结显示用） */
+extern volatile int32_t g_dbg_seg_idx;   /* 刚完成的段号（0-based） */
+extern volatile int32_t g_dbg_seg_yaw;    /* 该段结束时 yaw×10（带符号） */
+extern volatile int32_t g_dbg_arc_dir;   /* 最近一次 ARC/TURN 的 dir（+1左/-1右） */
 
 /* PathRunner 自身的运行模式（供外部/OLED 查询） */
 typedef enum {
@@ -57,6 +64,15 @@ void PathRunner_Start(void);
 
 /* 分段测试：直达指定目标点跑对应路径（0=A 1=B 2=C 3=D 4=终点）。 */
 void PathRunner_Goto(uint8_t target_idx);
+
+/* 分段测试（带截断）：跑指定目标点路径的前 seg_count 段。
+ * seg_count=0 表示跑完整路径（等价 PathRunner_Goto）。
+ * 例：PathRunner_GotoSegs(1, 11) = 到 B 减速点（跑完前 11 段即停，不含 SCAN/BCK 尾段）。 */
+void PathRunner_GotoSegs(uint8_t target_idx, uint32_t seg_count);
+
+/* 从指定段续跑（保留累计航向）：键4 到减速点后，键5 接着跑 SCAN+BCK 尾段。
+ * start_seg 为 0-based 起始段号，跑到路径末尾即停。 */
+void PathRunner_GotoSegsFrom(uint8_t target_idx, uint32_t start_seg);
 
 /* 置「当前任务完成」标志位：当前处于哪个任务点（A/B/C/D），右键就把该点标记完成，
  * 触发去下一个目标点行进。 */

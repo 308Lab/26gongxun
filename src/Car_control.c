@@ -52,6 +52,11 @@ static PosPID_TypeDef pid_arc;
 static PosPID_TypeDef pid_arcL;
 static PosPID_TypeDef pid_arcR;
 
+/* 倒车专用速度环（允许负输出）：pid_L/pid_R 的 out_min=0 会鉝掉负 PWM，
+ * 倒车目标速度是负的，故单独建两个允许负输出的 PID。 */
+static PosPID_TypeDef pid_backL;
+static PosPID_TypeDef pid_backR;
+
 /* 直行角度环（航向锁定） */
 static PosPID_TypeDef pid_heading;
 
@@ -98,6 +103,10 @@ void Car_Control_Init(void)
     PosPID_Init(&pid_heading, HEADING_KP, HEADING_KI, HEADING_KD,
                 HEADING_CORR_MAX, -HEADING_CORR_MAX,
                 HEADING_CORR_MAX, -HEADING_CORR_MAX);
+
+    /* 倒车速度环：复用直行环增益（L_KP/L_KI/L_KD），但允许负输出（±999） */
+    PosPID_Init(&pid_backL, L_KP, L_KI, L_KD, 999.0f, -999.0f, 500.0f, -500.0f);
+    PosPID_Init(&pid_backR, R_KP, R_KI, R_KD, 999.0f, -999.0f, 500.0f, -500.0f);
 }
 
 /* ==================== C. 直行速度环 ==================== */
@@ -209,6 +218,18 @@ void Go_Turn_WithPID(float target_speed_L, float target_speed_R)
  */
 void Car_SetTarget(float v_mm_per_cycle, float w_rad_per_cycle)
 {
+    /* 零速守卫：v、w 都为 0 表示「停车」，直接物理归零 + 清转弯积分。
+     * 修复「收起后持续左转」：原实现只把目标速度设 0，转弯 PID 积分
+     * (pid_arcL/pid_arcR) 未清 + 零目标走侧滑补偿 else 给右轮 +ARC_SIDE_SLIP_COMP，
+     * 形成持续左转偏置。这里统一等价 Stop()。 */
+    if (v_mm_per_cycle == 0.0f && w_rad_per_cycle == 0.0f)
+    {
+        PosPID_ClearAll(&pid_arcL);
+        PosPID_ClearAll(&pid_arcR);
+        Stop();
+        return;
+    }
+
     float B_eff = WHEEL_BASE_GEO_MM + wheel_base_correction;
     float half = w_rad_per_cycle * B_eff / 2.0f;   /* mm/周期 */
 
@@ -293,13 +314,13 @@ void Turn_Update(void)
         if (++turn_stable_cnt >= TURN_STABLE_CNT)
         {
             int32_t brake;
-            if (turn_dir > 0)   /* 左转 → 刹车向右（左轮+，右轮-） */
+            if (turn_dir > 0)   /* 左转 → 反向朝右刹（左轮+，右轮-） */
+            {
+                brake = +TURN_BRAKE_PWM;
+            }
+            else                /* 右转 → 反向朝左刹（左轮-，右轮+） */
             {
                 brake = -TURN_BRAKE_PWM;
-            }
-            else                /* 右转 → 刹车向左 */
-            {
-                brake =  TURN_BRAKE_PWM;
             }
             SetWheelSpeed(brake, -brake);
             turn_active = 2;
@@ -349,6 +370,8 @@ uint8_t Turn_IsActive(void)
 static uint8_t  go_active = 0;       /* 0=空闲，1=直行中，2=刹车中 */
 static float    go_target = 0.0f;
 static uint32_t go_brake_cnt = 0;
+static float    go_speed_L = TEST_BASE_SPEED_L;   /* 直行目标速度(mm/周期)，Scan 复写为慢速 */
+static float    go_speed_R = TEST_BASE_SPEED_R;
 
 void Go_Start(float dist_mm, float heading_deg)
 {
@@ -356,6 +379,8 @@ void Go_Start(float dist_mm, float heading_deg)
     go_target = dist_mm;
     go_active = 1;
     go_brake_cnt = 0;
+    go_speed_L = TEST_BASE_SPEED_L;
+    go_speed_R = TEST_BASE_SPEED_R;
 
     heading_target = heading_deg;
     PosPID_ClearAll(&pid_heading);
@@ -380,7 +405,7 @@ void Go_Update(void)
             return;
         }
 
-        Go_Ahead_WithPID(TEST_BASE_SPEED_L, TEST_BASE_SPEED_R);
+        Go_Ahead_WithPID(go_speed_L, go_speed_R);
     }
     else if (go_active == 2)
     {
@@ -395,6 +420,138 @@ void Go_Update(void)
 uint8_t Go_IsActive(void)
 {
     return go_active;
+}
+
+/* 倒车专用速度环：前馈 + pid_backL/pid_backR 微调（允许负输出）。
+ * 与 Go_Turn_WithPID 结构一致：负目标速度 → 前馈给负 PWM → PID 微调。
+ * 不用直行环 Go_Ahead_WithPID（它会把负输出鉝 0）。 */
+static void Back_WithPID(float target_speed_L, float target_speed_R)
+{
+    float fb_L = Odom_GetVL();
+    float fb_R = Odom_GetVR();
+
+    float ff_L = target_speed_L * L_FEEDFORWARD_GAIN;
+    float ff_R = target_speed_R * R_FEEDFORWARD_GAIN;
+
+    /* 增量式借用位置式 PID：target=0，feedback=fb-target，得 err=target-fb */
+    float trim_L = PosPID_Calc(&pid_backL, 0.0f, fb_L - target_speed_L);
+    float trim_R = PosPID_Calc(&pid_backR, 0.0f, fb_R - target_speed_R);
+
+    float out_L = ff_L + trim_L;
+    float out_R = ff_R + trim_R;
+
+    /* 对称 ±999 限幅（保留负号用于倒车） */
+    if (out_L >  999.0f) out_L =  999.0f;
+    if (out_L < -999.0f) out_L = -999.0f;
+    if (out_R >  999.0f) out_R =  999.0f;
+    if (out_R < -999.0f) out_R = -999.0f;
+
+    SetWheelSpeed((int32_t)out_L, (int32_t)out_R);
+}
+
+/* ==================== G.5 减速扫描（Scan）与倒车（Back） ==================== */
+
+static uint8_t  scan_active = 0;      /* 0=空闲，1=扫描中（前进），2=刹车中 */
+static float    scan_target = 0.0f;
+static uint32_t scan_brake_cnt = 0;
+
+void Scan_Start(float dist_mm, float heading_deg)
+{
+    Odom_Reset();
+    scan_target = dist_mm;
+    scan_active = 1;
+    scan_brake_cnt = 0;
+
+    heading_target = heading_deg;
+    PosPID_ClearAll(&pid_heading);
+    heading_locked = 1;
+}
+
+void Scan_Update(void)
+{
+    if (scan_active == 0)
+    {
+        return;
+    }
+
+    if (scan_active == 1)
+    {
+        /* 慢速前进，走满目标区域长度 → 进刹车态 */
+        if (Odom_GetDistanceMM() >= scan_target)
+        {
+            scan_active = 2;
+            scan_brake_cnt = 0;
+            SetWheelSpeed(-SCAN_BRAKE_PWM, -SCAN_BRAKE_PWM);
+            return;
+        }
+
+        Go_Ahead_WithPID(SCAN_BASE_SPEED_L, SCAN_BASE_SPEED_R);
+    }
+    else if (scan_active == 2)
+    {
+        if (++scan_brake_cnt >= SCAN_BRAKE_TICKS)
+        {
+            Stop();
+            scan_active = 0;
+        }
+    }
+}
+
+uint8_t Scan_IsActive(void)
+{
+    return scan_active;
+}
+
+static uint8_t  back_active = 0;      /* 0=空闲，1=倒车中，2=刹车中 */
+static float    back_target = 0.0f;
+static uint32_t back_brake_cnt = 0;
+
+void Back_Start(float dist_mm)
+{
+    Odom_Reset();
+    back_target = dist_mm;
+    back_active = 1;
+    back_brake_cnt = 0;
+    PosPID_ClearAll(&pid_backL);
+    PosPID_ClearAll(&pid_backR);
+}
+
+void Back_Update(void)
+{
+    if (back_active == 0)
+    {
+        return;
+    }
+
+    if (back_active == 1)
+    {
+        /* 倒车：编码器增量负向，Odom_GetDistanceMM 递减（车体中心位移为负）。
+         * 用 |distance| 判走满倒回距离。 */
+        float d = Odom_GetDistanceMM();
+        if (fabsf(d) >= back_target)
+        {
+            back_active = 2;
+            back_brake_cnt = 0;
+            SetWheelSpeed(SCAN_BRAKE_PWM, SCAN_BRAKE_PWM);   /* 反打正向刹车吃惯性 */
+            return;
+        }
+
+        /* 反向直行：不锁航向（倒车锁航向会反），用倒车专用速度环（pid_L/pid_R 闭环） */
+        Back_WithPID(-BACK_BASE_SPEED_L, -BACK_BASE_SPEED_R);
+    }
+    else if (back_active == 2)
+    {
+        if (++back_brake_cnt >= SCAN_BRAKE_TICKS)
+        {
+            Stop();
+            back_active = 0;
+        }
+    }
+}
+
+uint8_t Back_IsActive(void)
+{
+    return back_active;
 }
 
 /* ==================== H. 弧线转（Arc，扫描式非阻塞） ==================== */

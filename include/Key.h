@@ -6,14 +6,14 @@
 /*
  * 无阻塞矩阵键盘驱动（3×3 矩阵，行扫描）
  *
- * 硬件接线：
- *   行 Row_1(PE10)、Row_2(PE8)、Row_3(PE7)  → OUTPUT_PP（扫描驱动侧）
+ * 硬件接线（2026-10-12 更新：Row_2 已由 PE8 换脚到 PB2）：
+ *   行 Row_1(PE10)、Row_2(PB2)、Row_3(PE7)  → OUTPUT_PP（扫描驱动侧）
  *   列 Col_1(PE13)、Col_2(PE14)、Col_3(PE15) → INPUT + PULLUP（读取侧）
  *
  * 键位映射（第一行 = 7/8/9，第一列在左）：
  *         Col_1   Col_2   Col_3
  *   Row_1   7      8      9       (PE10)
- *   Row_2   4      5      6       (PE8, 占位，硬件暂未用)
+ *   Row_2   4      5      6       (PB2)
  *   Row_3   1      2      3       (PE7)
  *
  * 逻辑功能键：
@@ -41,6 +41,9 @@
 #define KEY_TO_D     0	/* 键 7：Row_1 × Col_1 = 0 */
 #define KEY_TO_END   1	/* 键 8：Row_1 × Col_2 = 1 */
 #define KEY_CALIB    2	/* 键 9：Row_1 × Col_3 = 2（校准从键3移到键9） */
+#define KEY_GO_A     3	/* 键 4：Row_2 × Col_1 = 3（跑到 A 点） */
+#define KEY_FWD      4	/* 键 5：Row_2 × Col_2 = 4（到 B 校准点） */
+#define KEY_SLOW     5	/* 键 6：Row_2 × Col_3 = 5（到 B 减速点） */
 
 /* 事件标志位 */
 #define KEY_HOLD				0x01

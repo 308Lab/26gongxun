@@ -52,6 +52,15 @@ static uint16_t cmd_seq = 0;
  * 直行段用它作航向目标。这样转弯过冲不会被下一段直行锁死。 */
 static float heading_ref = 0.0f;
 
+/* PATH_CALIB 段停车计时（ms，每 5ms tick 累加一次） */
+static uint32_t calib_waited_ms = 0;
+
+/* 【临时诊断】段完成时的 yaw 快照：记录「刚完成的段号 + 该段结束 yaw(×10)」。
+ * 供 OLED 冻结显示「每段结束瞬间的车头朝向」，避免盯实时滚动数字。 */
+volatile int32_t g_dbg_seg_idx = -1;      /* 刚完成的段号（0-based） */
+volatile int32_t g_dbg_seg_yaw  = 0;       /* 该段结束时 yaw×10（带符号） */
+volatile int32_t g_dbg_arc_dir  = 0;       /* 最近一次 ARC/TURN 的 dir（+1左/-1右） */
+
 /* 发一条命令（seq 自增），并进入「等 active」子状态 */
 static void IssueCmd(uint8_t cmd, int8_t dir, float param)
 {
@@ -61,24 +70,38 @@ static void IssueCmd(uint8_t cmd, int8_t dir, float param)
     g_cmd.heading = heading_ref;   /* 直行时携带当前累计航向；弧线转忽略 */
     g_cmd.seq     = ++cmd_seq;
     seg_phase     = SEG_WAIT_ACTIVE;
+
+    /* 【临时诊断】记录最近一次转弯的方向 */
+    if (cmd == CMD_ARC || cmd == CMD_TURN)
+    {
+        g_dbg_arc_dir = (int32_t)dir;
+    }
 }
 
 /* 切到下一段 */
 static void SegNext(void)
 {
+    /* 【临时诊断】冻结「刚完成段」的 yaw 快照，供 OLED 显示 */
+    g_dbg_seg_idx = (int32_t)cur_seg_idx;
+    g_dbg_seg_yaw = (int32_t)(Car_GetYaw() * 10.0f);
     cur_seg_idx++;
     seg_phase = SEG_WAIT_SEND;
 }
 
-/* 切换当前路段表 + 复位索引 / 子相位 / 累计航向（进入「跑某一段路径」前调用） */
-static void SwitchPath(const PathSeg *path, uint32_t len)
+/* 切换当前路段表 + 复位索引 / 子相位。
+ * reset_heading=1 同时清零累计航向（跑一条全新路径用）；
+ * reset_heading=0 保留累计航向（从中间段续跑、接着上一段的方向走，如 SCAN/BCK 尾段）。 */
+static void SwitchPath(const PathSeg *path, uint32_t len, uint8_t reset_heading)
 {
     cur_path     = path;
     cur_path_len = len;
     cur_seg_idx  = 0;
     seg_phase    = SEG_WAIT_SEND;
     cmd_seq      = 0;
-    heading_ref  = 0.0f;
+    if (reset_heading)
+    {
+        heading_ref  = 0.0f;
+    }
     g_cmd.cmd    = CMD_NONE;
     g_cmd.seq    = 0;
 }
@@ -97,7 +120,7 @@ static void PathTargetsInit(void)
 static void StartMovingToTarget(void)
 {
     task_done = 0;
-    SwitchPath(target_path[g_target_idx], target_len[g_target_idx]);
+    SwitchPath(target_path[g_target_idx], target_len[g_target_idx], 1);
     g_run_state = RUN_ST_MOVING;
 }
 
@@ -113,6 +136,12 @@ void PathRunner_Start(void)
 /* 分段测试：直达指定目标点跑对应路径（0=A 1=B 2=C 3=D 4=终点） */
 void PathRunner_Goto(uint8_t target_idx)
 {
+    PathRunner_GotoSegs(target_idx, 0);   /* 0 = 跑完整路径 */
+}
+
+/* 分段测试（带截断）：seg_count=0 跑完整，否则跑前 seg_count 段 */
+void PathRunner_GotoSegs(uint8_t target_idx, uint32_t seg_count)
+{
     if (target_idx >= TARGET_COUNT)
     {
         return;
@@ -121,7 +150,42 @@ void PathRunner_Goto(uint8_t target_idx)
     g_target_idx  = target_idx;
     g_end_reached = 0;
     task_done = 0;
-    StartMovingToTarget();
+
+    /* 跑完整路径：走 SwitchPath(len)；截断：临时写短 cur_path_len。
+     * 注意：cur_path_len 是「跑完就切 TASK/DONE」的边界，截断后同样走到
+     * 段末即停（进 TASK 或 DONE），语义一致。 */
+    SwitchPath(target_path[target_idx], target_len[target_idx], 1);
+    if (seg_count > 0 && seg_count < target_len[target_idx])
+    {
+        cur_path_len = seg_count;
+    }
+
+    g_run_state = RUN_ST_MOVING;
+}
+
+/* 从指定段开始续跑（保留累计航向）：用于「键5 到位后，键6 接着跑 SCAN+BCK 尾段」。
+ * start_seg 为 0-based 起始段号；跑完 cur_path_len 即停。
+ * 注意：上一段路径跑完时 path_runner 已 Car_YawCalibrate() 把 yaw 归零，
+ * 故此处 heading_ref 也必须归零（与新的 0° 基准一致），否则 SCAN 直行航向
+ * 锁会用残留的旧理论航向（如 -90°）对抗已经校准归零的实际 yaw，导致车打转/倒退。 */
+void PathRunner_GotoSegsFrom(uint8_t target_idx, uint32_t start_seg)
+{
+    if (target_idx >= TARGET_COUNT)
+    {
+        return;
+    }
+    PathTargetsInit();
+    g_target_idx  = target_idx;
+    g_end_reached = 0;
+    task_done = 0;
+
+    SwitchPath(target_path[target_idx], target_len[target_idx], 1);  /* 归零 heading_ref（与 yaw 校准一致） */
+    if (start_seg < target_len[target_idx])
+    {
+        cur_seg_idx = start_seg;
+    }
+
+    g_run_state = RUN_ST_MOVING;
 }
 
 void PathRunner_TaskDone(void)
@@ -239,6 +303,79 @@ void PathRunner_Tick(void)
             }
 
             if (!Turn_IsActive()) SegNext();
+            return;
+        }
+
+        case PATH_CALIB:
+        {
+            /* 停车校准（过减速带后重标 yaw）：
+             * 停车 param(ms) → Car_YawCalibrate() 归零 → 切下一段。
+             * 注意：校准只把「当前朝向记为 0°」，不改变车头朝向。
+             * 停车时长用 5ms tick 计数累加（path_runner 每 5ms tick 一次）。 */
+            if (seg_phase == SEG_WAIT_SEND)
+            {
+                /* 停止任何运动命令，确保车停稳 */
+                g_cmd.cmd = CMD_NONE;
+                Stop();
+                calib_waited_ms = 0;
+                seg_phase = SEG_WAIT_ACTIVE;   /* 复用 WAIT_ACTIVE 作「停车计时中」 */
+                return;
+            }
+
+            if (seg_phase == SEG_WAIT_ACTIVE)
+            {
+                calib_waited_ms += 5;   /* 每 tick 5ms */
+                if (calib_waited_ms >= (uint32_t)seg->param)
+                {
+                    Car_YawCalibrate();   /* 校准 yaw 归零 */
+                    heading_ref = 0.0f;   /* 同步清累计航向：CALIB 语义=当前朝向为新 0° 基准 */
+                    SegNext();
+                }
+                return;
+            }
+
+            /* 不该走到 SEG_WAIT_DONE，兜底切段 */
+            SegNext();
+            return;
+        }
+
+        case PATH_SCAN:
+        {
+            /* 减速扫描段：慢速通过目标区域，车侧摄像头观察物体顺序，
+             * 编码器全程记录实际位移（供后续 PATH_BCK 倒回参考）。
+             * 复用「发命令 → 等 active 1 → 等 active 0」三段式。 */
+            if (seg_phase == SEG_WAIT_SEND)
+            {
+                IssueCmd(CMD_SCAN, 0, seg->param);
+                return;
+            }
+
+            if (seg_phase == SEG_WAIT_ACTIVE)
+            {
+                if (Scan_IsActive()) seg_phase = SEG_WAIT_DONE;
+                return;
+            }
+
+            if (!Scan_IsActive()) SegNext();
+            return;
+        }
+
+        case PATH_BCK:
+        {
+            /* 倒车段：反向退到目标区域中间（写死距离）。 */
+            if (seg_phase == SEG_WAIT_SEND)
+            {
+                IssueCmd(CMD_BCK, 0, seg->param);
+                return;
+            }
+
+            if (seg_phase == SEG_WAIT_ACTIVE)
+            {
+                if (Back_IsActive()) seg_phase = SEG_WAIT_DONE;
+                return;
+            }
+
+            if (!Back_IsActive()) SegNext();
             return;
         }
 

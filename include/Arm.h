@@ -194,19 +194,31 @@ int Arm_CollectFrame(uint8_t *out, uint8_t max, uint8_t *len);
  * ⚠️⚠️ 量纲坑（2026-10-01 踩坑记录）：
  *   位置模式「脉冲数」字段 = 细分16 → 3200 脉冲/圈（每脉冲 0.1125°），
  *   而「实时位置(0x36)/编码器(0x31)」读回的是 65536/圈。两套量纲不同！
- *   角度换算：pulses = 角度° × 3200 / 360（90° = 800 脉冲，不是 16384）。
+ *   角度换算（电机轴）：pulses = 角度° × 3200 / 360
+ *     → 电机轴 90° = 800 脉冲（不是 16384）。
+ *   减速箱 7:1 后才到转台：转台 90° = 800 × 7 = 5600 脉冲。
+ *   ⚠️ 区分：800 是「电机轴 90°」，5600 才是「转台 90°」，勿混。
  */
 void Arm_MoveAbsolute(uint32_t pulses);
 
 /**
  * @brief 相对位置运动：以当前实时位置为基准，转指定脉冲增量
- * @param  pulses   脉冲增量（Emm 位置模式 = 3200 脉冲/圈，90° = 800）
+ * @param  pulses   脉冲增量（Emm 位置模式 = 3200 脉冲/圈，电机轴 90° = 800；
+ *                  转台还需除 7:1 减速比，即转台 90° = 5600）
  * @param  dir      方向（ARM_DIR_CW 顺时针 / ARM_DIR_CCW 逆时针）
  * @note   手动组帧发「运动模式=ARM_MOVE_REL_CUR(0x02)」，速度 60RPM、加速度 50。
  *         以当前实时位置为基准做相对运动，绕开「绝对定位坐标零点」死结，
  *         与定稿方案 B「手动收起态 + 相对定位」一致。
  */
 void Arm_MoveRelative(uint32_t pulses, uint8_t dir);
+
+/**
+ * @brief 相对位置运动（慢速变体，2026-10-13 D 救援段用）
+ * @param  pulses   脉冲增量（量纲同 Arm_MoveRelative）
+ * @param  dir      方向（ARM_DIR_CW / ARM_DIR_CCW）
+ * @note   速度 30 RPM（减半），加速度、帧格式与 Arm_MoveRelative 相同。
+ */
+void Arm_MoveRelativeSlow(uint32_t pulses, uint8_t dir);
 
 /**
  * @brief 获取最近一次成功锁存的原始回包帧（供 OLED 显示，无副作用）

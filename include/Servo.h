@@ -104,6 +104,12 @@ void Servo_SetInitPos(uint8_t id);                                          /* �
 void Servo_SetInitResume(uint8_t id);                                       /* 恢复初始值（启动恢复力矩） */
 void Servo_SendGroup(const char *body);                                     /* 成组同步发送：body=多条 #..! 拼接，自动包 {G0000 .. } */
 
+/* ---- PWM 夹爪舵机（独立一路：PD12 / TIM4_CH1，50Hz） ---- */
+/* 与总线舵机（UART4 ASCII）无关，走独立 PWM 输出。
+ * 角度 0~270° ↔ 500~2500us；TIM4 配置 PSC=71 / ARR=19999 → 1 count = 1 us。 */
+void PWM_Servo_SetPulseUs(uint16_t us);     /* 直接设定脉宽（us），钳位 500~2500 */
+void PWM_Servo_SetAngle(float deg);         /* 设定角度（°），0~270 */
+
 /* ---- 回读解析 ---- */
 void Servo_Feed(uint8_t byte);            /* 喂入回读字节（由调用方驱动） */
 void Servo_Poll(void);                    /* 轮询解析完整应答帧（主循环调用） */
@@ -111,7 +117,7 @@ uint8_t Servo_HasReply(void);             /* 是否有一帧新应答待取 */
 servo_reply_t Servo_GetReply(void);       /* 取出最新解析结果 */
 
 /* ==================== 外部变量 ==================== */
-extern servo_reply_t servo_last_reply;            /* 最近一次解析结果 */
+extern volatile servo_reply_t servo_last_reply;            /* 最近一次解析结果（跨任务共享，volatile） */
 
 #ifdef __cplusplus
 }

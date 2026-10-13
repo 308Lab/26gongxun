@@ -55,3 +55,58 @@ void Transmit_Heartbeat(void)
     frame.len = 0;
     Transmit_Frame(&frame);
 }
+
+/* ==================== 视觉协议 v1.4 语义化发送 ==================== */
+
+/* 请求扫码（0x10，LEN=0） */
+void Transmit_ReqScan(void)
+{
+    TransmitFrame_t frame;
+    frame.cmd = HOST_CMD_REQ_SCAN;
+    frame.len = 0;
+    Transmit_Frame(&frame);
+}
+
+/* 观察三物体（0x20/0x30/0x40，LEN=0） */
+void Transmit_ObsThree(uint8_t cmd)
+{
+    TransmitFrame_t frame;
+    frame.cmd = cmd;
+    frame.len = 0;
+    Transmit_Frame(&frame);
+}
+
+/* 开始追踪（0x22/0x25/0x32/0x42，LEN=2，DATA=控制周期 Hz int16 大端） */
+void Transmit_TrackBegin(uint8_t cmd, uint16_t rate_hz)
+{
+    TransmitFrame_t frame;
+    frame.cmd = cmd;
+    frame.len = VISION_TRACK_RATE_LEN;   /* 2 字节 */
+    frame.data[0] = (uint8_t)((rate_hz >> 8) & 0xFF);  /* 高八位 */
+    frame.data[1] = (uint8_t)(rate_hz & 0xFF);         /* 低八位 */
+    Transmit_Frame(&frame);
+}
+
+/* 停止追踪（0x24/0x27/0x34/0x44，LEN=0） */
+void Transmit_TrackStop(uint8_t cmd)
+{
+    TransmitFrame_t frame;
+    frame.cmd = cmd;
+    frame.len = 0;
+    Transmit_Frame(&frame);
+}
+
+/* 末端位姿上报（0x14，LEN=6，xyz int16 大端，单位 mm） */
+void Transmit_PoseReport(int16_t x_mm, int16_t y_mm, int16_t z_mm)
+{
+    TransmitFrame_t frame;
+    frame.cmd = HOST_CMD_POSE_REPORT;
+    frame.len = VISION_XYZ_LEN;   /* 6 字节 */
+    frame.data[0] = (uint8_t)((x_mm >> 8) & 0xFF);
+    frame.data[1] = (uint8_t)(x_mm & 0xFF);
+    frame.data[2] = (uint8_t)((y_mm >> 8) & 0xFF);
+    frame.data[3] = (uint8_t)(y_mm & 0xFF);
+    frame.data[4] = (uint8_t)((z_mm >> 8) & 0xFF);
+    frame.data[5] = (uint8_t)(z_mm & 0xFF);
+    Transmit_Frame(&frame);
+}

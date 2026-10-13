@@ -106,8 +106,8 @@ float Car_TurnError(float target_yaw);
 
 /* 原地转弯角度环 PID 参数（起步纯 P，后续按需加 Ki/Kd） */
 #define TURN_KP           6.0f
-#define TURN_KI           0.0f
-#define TURN_KD           0.0f
+#define TURN_KI           0.06f   /* 外环加积分：消静差，治“车停在误差边缘不动”的死锁 */
+#define TURN_KD           0.4f    /* 外环加微分：抑制积分带来的过冲/震荡 */
 #define TURN_PWM_MAX      400     /* 原地转 PWM 上限 */
 #define TURN_PWM_MIN      150     /* 最小启动 PWM（死区），克服静摩擦防卡住 */
 #define TURN_INTEGRAL_MAX 300.0f  /* 积分限幅（anti-windup） */
@@ -154,6 +154,32 @@ uint8_t Turn_IsActive(void);
 void Go_Start(float dist_mm, float heading_deg);
 void Go_Update(void);
 uint8_t Go_IsActive(void);
+
+/* ==================== 5.5 减速扫描（Scan，慢速通过观察） ==================== */
+
+/* 减速扫描基础速度（mm/周期）：明显低于直行 TEST_BASE_SPEED，
+ * 慢速通过目标区域给车侧摄像头足够观察时间。 */
+#define SCAN_BASE_SPEED_L    0.70f
+#define SCAN_BASE_SPEED_R    0.70f
+
+/* 倒车（Back）速度（mm/周期）：反向慢速退回目标区中间 */
+#define BACK_BASE_SPEED_L    0.60f
+#define BACK_BASE_SPEED_R    0.60f
+
+/* 扫描/倒车到位刹车（阈值 PWM 与直行一致） */
+#define SCAN_BRAKE_PWM       BRAKE_PWM
+#define SCAN_BRAKE_TICKS     BRAKE_TICKS
+
+/* Scan_Start 减速慢行通过目标区域（前进），走满 dist_mm 到位刹车。
+ * 编码器由里程计持续累计，供倒回参考；观察顺序由视觉层并行读取。 */
+void Scan_Start(float dist_mm, float heading_deg);
+void Scan_Update(void);
+uint8_t Scan_IsActive(void);
+
+/* Back_Start 倒车退 dist_mm（反向，编码器增量负向，里程计距离递减）。 */
+void Back_Start(float dist_mm);
+void Back_Update(void);
+uint8_t Back_IsActive(void);
 
 /* ==================== 6. 弧线转（Arc，扫描式非阻塞） ==================== */
 

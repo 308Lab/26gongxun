@@ -29,7 +29,7 @@ const PathSeg g_path_to_A[] = {
  *   直行（距离待定，参考原方案的 420/180/480/400）
  */
 const PathSeg g_path_to_A[] = {
-    { PATH_STR,  0, 615.0f },   /* 1 直行（到达 A 点，距离待定） */
+    { PATH_STR,  0, 640.0f },   /* 1 直行（到达 A 点，距离待定） */
 };
 
 const uint32_t g_path_to_A_count = sizeof(g_path_to_A) / sizeof(g_path_to_A[0]);
@@ -56,17 +56,20 @@ const PathSeg g_path_to_B[] = {
  * 段类型：PATH_TURN=原地转弯，PATH_ARC=弧线转（非原地）。
  * 距离均待定（参考原 1350/530/450）。
  */
-const PathSeg g_path_to_B[] = {
+PathSeg g_path_to_B[] = {
     { PATH_TURN, +1,  90.0f },  /* 1 原地左转 90° */
-    { PATH_STR,   0, 450.0f },  /* 2 直行（距离待定） */
+    { PATH_STR,   0, 485.0f },  /* 2 直行（距离待定） */
     { PATH_ARC,  -1,  90.0f },  /* 3 右转（非原地） */
-    { PATH_STR,   0, 530.0f },  /* 4 直行（距离待定） */
-    { PATH_ARC,  +1,  90.0f },  /* 5 左转（非原地） */
-    { PATH_STR,   0, 400.0f },  /* 6 直行（距离待定） */
-    { PATH_ARC,  -1,  90.0f },  /* 7 右转（非原地） */
-    { PATH_STR,   0, 520.0f },  /* 8 直行（距离待定） */
-    { PATH_ARC,  -1,  90.0f },  /* 9 右转（非原地） */
-    { PATH_STR,   0, 380.0f },  /* 10 直行（到达 B 点，距离待定） */
+    { PATH_STR,   0, 720.0f },  /* 4 直行（距离待定） */
+    { PATH_CALIB, 0, 500.0f },  /* 5 停车 0.5s + 校准陀螺仪 yaw（过减速带后重标） */
+    { PATH_TURN, +1,  90.0f },  /* 6 原地左转 90° */
+    { PATH_STR,   0, 600.0f },  /* 7 直行（校准后左转第一个直线） */
+    { PATH_ARC,  -1,  90.0f },  /* 8 右转（非原地） */
+    { PATH_STR,   0, 555.0f },  /* 9 直行（距离待定） */
+    { PATH_ARC,  -1,  90.0f },  /* 10 右转（非原地） */
+    { PATH_STR,   0, 170.0f },  /* 11 直行（到达 B 减速点，距离待定） */
+    { PATH_SCAN,  0, 500.0f },  /* 12 减速扫描：慢速通过 B 目标区（车侧摄像头观察顺序） */
+    { PATH_BCK,   0, 250.0f },  /* 13 倒回 B 目标区中间（三物体中间，写死） */
 };
 
 const uint32_t g_path_to_B_count = sizeof(g_path_to_B) / sizeof(g_path_to_B[0]);
@@ -78,7 +81,9 @@ const uint32_t g_path_to_B_count = sizeof(g_path_to_B) / sizeof(g_path_to_B[0]);
  * 弧线转方向约定同上：dir=-1 右转，dir=+1 左转。
  */
 const PathSeg g_path_to_C[] = {
-    { PATH_STR,  0, 1700.0f },   /* 1 直行（到达 C 点） */
+    { PATH_STR,  0, 1460.0f },   /* 1 直行（到达 C 减速点） */
+    { PATH_SCAN, 0,  500.0f },   /* 2 减速扫描：慢速通过 C 目标区（车侧摄像头观察顺序） */
+    { PATH_BCK,  0,  250.0f },   /* 3 倒回 C 目标区中间（写死） */
 };
 
 const uint32_t g_path_to_C_count = sizeof(g_path_to_C) / sizeof(g_path_to_C[0]);
@@ -90,9 +95,11 @@ const uint32_t g_path_to_C_count = sizeof(g_path_to_C) / sizeof(g_path_to_C[0]);
  * 弧线转方向约定同上：dir=-1 右转，dir=+1 左转。
  */
 const PathSeg g_path_to_D[] = {
-    { PATH_STR,  0, 400.0f },    /* 1 直行 */
+    { PATH_STR,  0, 420.0f },    /* 1 直行 */
     { PATH_ARC, -1,  90.0f },    /* 2 右转 90° */
-    { PATH_STR,  0, 690.0f },    /* 3 直行（到达 D 点） */
+    { PATH_STR,  0, 480.0f },    /* 3 直行（到达 D 减速点） */
+    { PATH_SCAN, 0, 400.0f },    /* 4 减速扫描：慢速通过 D 目标区（车侧摄像头观察顺序） */
+    { PATH_BCK,  0, 200.0f },    /* 5 倒回 D 目标区中间（写死） */
 };
 
 const uint32_t g_path_to_D_count = sizeof(g_path_to_D) / sizeof(g_path_to_D[0]);
@@ -102,7 +109,7 @@ const uint32_t g_path_to_D_count = sizeof(g_path_to_D) / sizeof(g_path_to_D[0]);
  *   直行1600
  */
 const PathSeg g_path_to_END[] = {
-    { PATH_STR,  0, 1625.0f },   /* 1 直行（到达终点） */
+    { PATH_STR,  0, 1655.0f },   /* 1 直行（到达终点） */
 };
 
 const uint32_t g_path_to_END_count = sizeof(g_path_to_END) / sizeof(g_path_to_END[0]);

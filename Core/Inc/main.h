@@ -72,16 +72,14 @@ extern UART_HandleTypeDef huart1;
 #define Gyro_Tx_GPIO_Port GPIOA
 #define Gyro_Rx_Pin GPIO_PIN_3
 #define Gyro_Rx_GPIO_Port GPIOA
-#define PWM_Servo_Pin GPIO_PIN_6
-#define PWM_Servo_GPIO_Port GPIOA
 #define PWM_MA_Pin GPIO_PIN_0
 #define PWM_MA_GPIO_Port GPIOB
 #define PWM_MB_Pin GPIO_PIN_1
 #define PWM_MB_GPIO_Port GPIOB
+#define Key_Row_2_Pin GPIO_PIN_2
+#define Key_Row_2_GPIO_Port GPIOB
 #define Key_Row_3_Pin GPIO_PIN_7
 #define Key_Row_3_GPIO_Port GPIOE
-#define Key_Row_2_Pin GPIO_PIN_8
-#define Key_Row_2_GPIO_Port GPIOE
 #define Enc_MA_1_Pin GPIO_PIN_9
 #define Enc_MA_1_GPIO_Port GPIOE
 #define Key_Row_1_Pin GPIO_PIN_10
@@ -106,6 +104,8 @@ extern UART_HandleTypeDef huart1;
 #define AIN_1_GPIO_Port GPIOD
 #define AIN_2_Pin GPIO_PIN_9
 #define AIN_2_GPIO_Port GPIOD
+#define PWM_Servo_Pin GPIO_PIN_15
+#define PWM_Servo_GPIO_Port GPIOD
 #define Enc_MB_1_Pin GPIO_PIN_6
 #define Enc_MB_1_GPIO_Port GPIOC
 #define Enc_MB_2_Pin GPIO_PIN_7

@@ -1,31 +1,115 @@
 #include "CommParser.h"
+#include "Transmitter.h"
+#include "Vision.h"
+#include "path_runner.h"
+#include "Car_control.h"
 
 uint8_t comm_error_flag;    // 通信错误标志位
 uint8_t parsed_flag;        // 解析完成标志位
 
+/* ==================== 应答与动作辅助 ==================== */
+
+/* 心跳：收到 0xFE 回 0xFE（协议 §3.1 双向对称） */
+static void HandleHeartbeat(void)
+{
+    Transmit_Heartbeat();
+}
+
 /* ==================== 指令解析函数 ==================== */
 /**
  * 在该函数中解析具体指令，并置对应标志位 / 派发到业务层。
- * 由上位机下发的运动/急停/查询指令在此消费；业务动作按底盘语义接入。
+ *
+ * 协议 v1.4 落地：
+ *   - 视觉 → MCU 的带语义指令：解析后回 ACK（§2.1 单向应答）。
+ *   - 收到 ACK(0xFF)、心跳(0xFE) 不回 ACK。
+ *   - 未识别指令 → comm_error_flag=1（由上层的 CommunicateToHost 判断）。
  */
 void CMD_Parse(serial_frame_t *frame)
 {
     switch (frame->cmd)
     {
+        /* ================= 底盘控制（旧上位机语义） ================= */
         case HOST_CMD_GO:        /* 直行 */
-            /* TODO: 接入底盘直行指令（例如 g_cmd 下发或 PathRunner 触发） */
+            /* TODO: 接入底盘直行（PathRunner / RunTask 触发） */
             break;
 
         case HOST_CMD_TURN:      /* 转弯：DATA[0]=角度, DATA[1]=方向 */
-            /* TODO: 接入底盘转弯指令 */
+            /* TODO: 接入底盘转弯 */
             break;
 
         case HOST_CMD_STOP:      /* 急停 */
-            /* TODO: 调用 Stop() */
+            /* TODO: 调用底盘急停 Stop()（Car_control） */
             break;
 
-        case HOST_CMD_STATUS_Q:  /* 状态查询：回复状态包 */
-            /* TODO: Transmit 状态回复（0x81） */
+        case HOST_CMD_STATUS_Q:  /* 状态查询：回复状态包 0x81 */
+            /* TODO: 组织 4B 状态载荷并 Transmit 0x81 */
+            break;
+
+        /* ================= 全局指令（视觉语义） ================= */
+        case HOST_CMD_SCAN_DONE:      /* 0x11 扫码完成（纯信号） */
+            Vision_OnScanDone();
+            Transmit_Ack(HOST_CMD_SCAN_DONE);
+            break;
+
+        case HOST_CMD_IDENT_ERR:      /* 0x12 识别错误（DATA=错误码 1B） */
+            Vision_OnIdentErr(frame->len >= 1 ? frame->data[0] : 0);
+            Transmit_Ack(HOST_CMD_IDENT_ERR);
+            break;
+
+        case HOST_CMD_TARGET_LOST:    /* 0x13 目标丢失/出视野（纯信号） */
+            Vision_OnTargetLost();
+            Transmit_Ack(HOST_CMD_TARGET_LOST);
+            break;
+
+        /* ================= 排爆系列（0x2x）================= */
+        case HOST_CMD_A_RET_3:        /* 0x21 回三目标（LEN=19） */
+            if (Vision_OnThreeTarget(frame->data, frame->len) == 0)
+                Transmit_Ack(HOST_CMD_A_RET_3);
+            break;
+
+        case HOST_CMD_A_TRACK_POS:    /* 0x23 流式单目标（LEN=6） */
+            if (Vision_OnSingleTarget(frame->data, frame->len) == 0)
+                Transmit_Ack(HOST_CMD_A_TRACK_POS);
+            break;
+
+        case HOST_CMD_A_PLACE_POS:    /* 0x26 流式排爆桶（LEN=6） */
+            if (Vision_OnSingleTarget(frame->data, frame->len) == 0)
+                Transmit_Ack(HOST_CMD_A_PLACE_POS);
+            break;
+
+        /* ================= 反恐系列（0x3x）================= */
+        case HOST_CMD_B_RET_3:        /* 0x31 回三目标（LEN=19） */
+            if (Vision_OnThreeTarget(frame->data, frame->len) == 0)
+                Transmit_Ack(HOST_CMD_B_RET_3);
+            break;
+
+        case HOST_CMD_B_TRACK_POS:    /* 0x33 流式单目标（LEN=6） */
+            if (Vision_OnSingleTarget(frame->data, frame->len) == 0)
+                Transmit_Ack(HOST_CMD_B_TRACK_POS);
+            break;
+
+        case HOST_CMD_B_TARGET_DOWN:  /* 0x35 目标倒下（LEN=0） */
+            Vision_OnTargetDown();
+            Transmit_Ack(HOST_CMD_B_TARGET_DOWN);
+            break;
+
+        /* ================= 救援系列（0x4x）================= */
+        case HOST_CMD_C_RET_3:        /* 0x41 回三目标（LEN=19） */
+            if (Vision_OnThreeTarget(frame->data, frame->len) == 0)
+                Transmit_Ack(HOST_CMD_C_RET_3);
+            break;
+
+        case HOST_CMD_C_TRACK_POS:    /* 0x43 流式单目标（LEN=6） */
+            if (Vision_OnSingleTarget(frame->data, frame->len) == 0)
+                Transmit_Ack(HOST_CMD_C_TRACK_POS);
+            break;
+
+        /* ================= 心跳 / 应答 ================= */
+        case HOST_CMD_HEARTBEAT:      /* 0xFE 心跳：回 0xFE，不回 ACK */
+            HandleHeartbeat();
+            break;
+
+        case HOST_CMD_ACK:            /* 0xFF 收到 ACK：不回 ACK（协议 §2.1） */
             break;
 
         default:

@@ -45,6 +45,25 @@ void Transmit_Frame(TransmitFrame_t *frame);
 void Transmit_Ack(uint8_t ack_cmd);
 void Transmit_Heartbeat(void);
 
+/* ---- 视觉协议 v1.4 语义化发送（MCU→视觉/上位机） ---- */
+
+/* 请求扫码（0x10，LEN=0） */
+void Transmit_ReqScan(void);
+
+/* 观察三物体（0x20 排爆 / 0x30 反恐 / 0x40 救援，LEN=0） */
+void Transmit_ObsThree(uint8_t cmd);
+
+/* 开始追踪（0x22/0x25/0x32/0x42，LEN=2，DATA=控制周期 Hz int16 大端） */
+void Transmit_TrackBegin(uint8_t cmd, uint16_t rate_hz);
+
+/* 停止追踪（0x24/0x27/0x34/0x44，LEN=0） */
+void Transmit_TrackStop(uint8_t cmd);
+
+/* 末端位姿上报（0x14，LEN=6，xyz int16 大端，单位 mm） */
+void Transmit_PoseReport(int16_t x_mm, int16_t y_mm, int16_t z_mm);
+
+/* @note 通用底层：发送「一帧自定义 DATA」仍在 Transmit_Frame 里，上述为语义封装。 */
+
 #ifdef __cplusplus
 }
 #endif

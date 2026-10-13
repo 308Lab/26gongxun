@@ -33,18 +33,69 @@
 /* ==================== 指令定义 ==================== */
 
 /**
- * 指令集（药品搬运车 / 反恐排爆救援机器人 语义），按需增删。
- * 参考协议文档：直行/转弯/急停/状态查询/状态回复/心跳/ACK。
+ * 指令集（视觉/上位机 ↔ MCU 通信，协议 v1.4，2026-10-01 定稿）
+ * 参考：`通信协议_视觉与MCU_v1.4_20261001.md`
+ *
+ * 帧格式：0xA5 | CMD | LEN | DATA[0..LEN-1] | XOR
+ *   物理层 USART3（PB10=TX / PB11=RX，115200 8N1）。
+ *   校验 XOR = CMD ^ LEN ^ DATA[0] ^ ... ^ DATA[LEN-1]（不含帧头）。
+ *
+ * 应答：仅 MCU 应答（0xFF ACK）；视觉/上位机不回 ACK；收到 ACK 不回 ACK。
  */
 typedef enum {
+    /* ---- 底盘控制（旧上位机语义，保留兼容） ---- */
     HOST_CMD_GO        = 0x01,   // 直行一个路段（速度/距离由 MCU 编码器闭环预设）
     HOST_CMD_TURN      = 0x02,   // 原地旋转：DATA[0]=角度(0~180), DATA[1]=方向(0x00右/0x01左)
     HOST_CMD_STOP      = 0x06,   // 急停，无条件停止所有电机
     HOST_CMD_STATUS_Q  = 0x07,   // 状态查询 (上位机 -> MCU)
     HOST_CMD_STATUS_R  = 0x81,   // 状态回复 (MCU -> 上位机)，4B 载荷
-    HOST_CMD_HEARTBEAT = 0xFE,   // 心跳包
-    HOST_CMD_ACK       = 0xFF,   // 应答包
+
+    /* ---- 全局指令（v1.4 §3.0） ---- */
+    HOST_CMD_REQ_SCAN   = 0x10,  // MCU→视觉：请求扫码（LEN=0）
+    HOST_CMD_SCAN_DONE  = 0x11,  // 视觉→MCU：扫码完成（LEN=0，纯信号）
+    HOST_CMD_IDENT_ERR  = 0x12,  // 视觉→MCU：识别错误（LEN=1，DATA=错误码）
+    HOST_CMD_TARGET_LOST= 0x13,  // 视觉→MCU：目标丢失/出视野（LEN=0，纯信号）
+    HOST_CMD_POSE_REPORT= 0x14,  // MCU→上位机：末端位姿上报（LEN=6，xyz int16 大端）
+
+    /* ---- 排爆系列（v1.4 §3.3，0x2x） ---- */
+    HOST_CMD_A_OBS_3      = 0x20, // MCU→视觉：观察三物体（排爆）LEN=0
+    HOST_CMD_A_RET_3      = 0x21, // 视觉→MCU：回三目标（LEN=19，3组xyz+target_id）
+    HOST_CMD_A_TRACK_BEGIN= 0x22, // MCU→视觉：开始追踪（抓取段）LEN=2，控制周期Hz
+    HOST_CMD_A_TRACK_POS  = 0x23, // 视觉→MCU：流式回单目标（LEN=6）
+    HOST_CMD_A_TRACK_STOP = 0x24, // MCU→视觉：停止追踪（抓取段）LEN=0
+    HOST_CMD_A_PLACE_BEGIN= 0x25, // MCU→视觉：开始追踪（放置段）LEN=2，控制周期Hz
+    HOST_CMD_A_PLACE_POS  = 0x26, // 视觉→MCU：流式回排爆桶（LEN=6）
+    HOST_CMD_A_PLACE_STOP = 0x27, // MCU→视觉：停止追踪（放置段）LEN=0
+
+    /* ---- 反恐系列（v1.4 §3.4，0x3x） ---- */
+    HOST_CMD_B_OBS_3      = 0x30, // MCU→视觉：观察三物体（反恐标靶）LEN=0
+    HOST_CMD_B_RET_3      = 0x31, // 视觉→MCU：回三目标（LEN=19）
+    HOST_CMD_B_TRACK_BEGIN= 0x32, // MCU→视觉：开始追踪（锁定标靶）LEN=2
+    HOST_CMD_B_TRACK_POS  = 0x33, // 视觉→MCU：流式回单目标（LEN=6，激光系偏移）
+    HOST_CMD_B_TRACK_STOP = 0x34, // MCU→视觉：停止追踪（MCU判对准）LEN=0
+    HOST_CMD_B_TARGET_DOWN= 0x35, // 视觉→MCU：目标倒下（LEN=0，关激光）
+
+    /* ---- 救援系列（v1.4 §3.5，0x4x） ---- */
+    HOST_CMD_C_OBS_3      = 0x40, // MCU→视觉：观察三物体（救援目标）LEN=0
+    HOST_CMD_C_RET_3      = 0x41, // 视觉→MCU：回三目标（LEN=19）
+    HOST_CMD_C_TRACK_BEGIN= 0x42, // MCU→视觉：开始追踪（锁定救援目标）LEN=2
+    HOST_CMD_C_TRACK_POS  = 0x43, // 视觉→MCU：流式回单目标（LEN=6）
+    HOST_CMD_C_TRACK_STOP = 0x44, // MCU→视觉：停止追踪（MCU判到位）LEN=0
+
+    /* ---- 心跳 / 应答 ---- */
+    HOST_CMD_HEARTBEAT = 0xFE,   // 心跳包（双向对称：收 0xFE 回 0xFE）
+    HOST_CMD_ACK       = 0xFF,   // 应答包（仅 MCU 发，DATA=[被应答 CMD]）
 } serial_cmd_t;
+
+/* ==================== 协议数据长度约定（v1.4） ==================== */
+#define VISION_XYZ_LEN        6     /* int16 大端 xyz 单目标坐标 = 6 字节 */
+#define VISION_3TARGET_LEN    19    /* 3 组 xyz(18B) + target_id(1B) = 19 字节 */
+#define VISION_TRACK_RATE_LEN 2     /* 开始追踪帧 DATA = 控制周期 Hz int16 大端 = 2 字节 */
+
+/* 回三目标帧的 target_id 取值（v1.4 §2.4 补充） */
+#define VISION_TARGET_LEFT    1     /* 左 */
+#define VISION_TARGET_MID     2     /* 中 */
+#define VISION_TARGET_RIGHT   3     /* 右 */
 
 /* ==================== 接收状态机 ==================== */
 

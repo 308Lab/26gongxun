@@ -421,7 +421,8 @@ void Arm_MoveAbsolute(uint32_t pulses)
 /* ============================================================
  * 相对位置运动：以当前实时位置为基准，转指定脉冲增量
  * 帧：Addr FD 方向(2B) 速度(2B) 加速度 脉冲数(4B) 运动模式(02) 同步 6B
- * 脉冲数量纲 = 3200/圈（细分16），90° = 800 脉冲。
+ * 脉冲数量纲 = 3200/圈（细分16）× 减速比 7 = 22400/圈，90° = 5600 脉冲。
+ * （注：步进输出轴经 7:1 减速箱，引到转台；旧「90°=800」为未算减速比的误写）
  * ============================================================ */
 void Arm_MoveRelative(uint32_t pulses, uint8_t dir)
 {
@@ -448,6 +449,40 @@ void Arm_MoveRelative(uint32_t pulses, uint8_t dir)
     cmd[9]  = (uint8_t)(pulses & 0xFF);
     cmd[10] = ARM_MOVE_REL_CUR;        /* 运动模式 02 = 相对当前实时位置 */
     cmd[11] = 0;                       /* 同步标志 0 = 立即执行 */
+    cmd[12] = ZDT_FRAME_END;
+
+    ZDT_UART_SendCmd(cmd, 13);
+}
+
+/* ============================================================
+ * 相对位置运动（慢速变体）：速度减半 30 RPM（2026-10-13，D 救援段用）
+ * 其余与 Arm_MoveRelative 相同，仅 vel 60 → 30。
+ * ============================================================ */
+void Arm_MoveRelativeSlow(uint32_t pulses, uint8_t dir)
+{
+    uint8_t cmd[13];
+    uint16_t vel = 30;         /* 30 RPM（减半，慢速） */
+    uint8_t  acc = 50;         /* 曲线加减速档位 */
+
+    if (dir > ARM_DIR_CCW)
+    {
+        dir = ARM_DIR_CW;      /* 非法方向兜底到 CW */
+    }
+
+    ZDT_UART_ClearBuffer();
+
+    cmd[0]  = ARM_ADDR;
+    cmd[1]  = ARM_MOVE_CMD;            /* 0xFD */
+    cmd[2]  = dir;
+    cmd[3]  = (uint8_t)(vel >> 8);
+    cmd[4]  = (uint8_t)(vel & 0xFF);
+    cmd[5]  = acc;
+    cmd[6]  = (uint8_t)(pulses >> 24);
+    cmd[7]  = (uint8_t)(pulses >> 16);
+    cmd[8]  = (uint8_t)(pulses >> 8);
+    cmd[9]  = (uint8_t)(pulses & 0xFF);
+    cmd[10] = ARM_MOVE_REL_CUR;        /* 运动模式 02 */
+    cmd[11] = 0;                       /* 同步标志 0 */
     cmd[12] = ZDT_FRAME_END;
 
     ZDT_UART_SendCmd(cmd, 13);

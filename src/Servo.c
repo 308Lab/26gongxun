@@ -43,8 +43,7 @@ void Servo_SetDir(servo_dir_t dir)
         HAL_GPIO_WritePin(SERVO_TX_SW_PORT, SERVO_TX_SW_PIN, GPIO_PIN_RESET);  /* TX 断开 */
         HAL_GPIO_WritePin(SERVO_RX_SW_PORT, SERVO_RX_SW_PIN, GPIO_PIN_SET);    /* RX 导通 */
     }
-    /* 通道切换稳定延时，避免开关切换瞬间收发冲突/丢首字节 */
-    HAL_Delay(1);
+    /* 通道切换稳定延时已移除（测试无延时是否影响收发），如丢首字节可恢复 HAL_Delay(1) */
 }
 
 void Servo_SendString(const char *str)
@@ -208,8 +207,20 @@ void Servo_SendGroup(const char *body)
 
 /* ==================== 回读解析 ==================== */
 
-servo_reply_t servo_last_reply;              /* 最近一次解析结果 */
-static volatile uint8_t s_reply_ready = 0;   /* 新应答标志 */
+volatile servo_reply_t servo_last_reply;     /* 最近一次解析结果（跨任务共享，须 volatile） */
+
+/* 回包环形队列：解决「连发多条读命令时，单标志丢包」问题。
+ * 视觉伺服/快速采样场景下，连续发 3 条 PRAD，回包可能在同一 Servo_Poll 周期内
+ * 连续到达，单标志会被覆盖丢弃。用队列缓存多个解析结果。 */
+#define SERVO_REPLY_QUEUE_SIZE   8
+static servo_reply_t s_reply_queue[SERVO_REPLY_QUEUE_SIZE];
+static volatile uint8_t s_reply_head = 0;   /* 写入位置（中断/IPC 侧） */
+static volatile uint8_t s_reply_tail = 0;   /* 读取位置（主循环侧） */
+
+static uint8_t s_reply_count(void)
+{
+    return (uint8_t)((s_reply_head - s_reply_tail) % SERVO_REPLY_QUEUE_SIZE);
+}
 
 /* 帧组装缓存：从 '#' 一直到 '!' */
 static char s_frame[32];
@@ -233,7 +244,12 @@ void Servo_Feed(uint8_t byte)
             s_frame[s_frame_len] = '\0';
             s_in_frame = 0;
             parse_reply(s_frame, s_frame_len);
-            s_reply_ready = 1;
+            /* 入队（非阻塞；队满丢弃最旧一条，优先保留最新） */
+            uint8_t next = (uint8_t)((s_reply_head + 1) % SERVO_REPLY_QUEUE_SIZE);
+            if (next != s_reply_tail) {
+                s_reply_queue[s_reply_head] = servo_last_reply;
+                s_reply_head = next;
+            }
         }
     }
 }
@@ -333,11 +349,50 @@ void Servo_Poll(void)
 
 uint8_t Servo_HasReply(void)
 {
-    return s_reply_ready;
+    return (s_reply_count() > 0) ? 1 : 0;
 }
 
 servo_reply_t Servo_GetReply(void)
 {
-    s_reply_ready = 0;
-    return servo_last_reply;
+    servo_reply_t r;
+    __disable_irq();
+    if (s_reply_tail == s_reply_head) {
+        r.kind = SERVO_REPLY_NONE;
+        r.id = 0;
+        r.pwm = 0;
+    } else {
+        r = s_reply_queue[s_reply_tail];
+        s_reply_tail = (uint8_t)((s_reply_tail + 1) % SERVO_REPLY_QUEUE_SIZE);
+    }
+    __enable_irq();
+    return r;
+}
+
+/* ==================== PWM 夹爪舵机（PD15 / TIM4_CH4） ==================== */
+/*
+ * 与总线舵机（UART4 ASCII）无关，独立一路 PWM。
+ * TIM4：PSC=71 / ARR=19999 → 72MHz / (71+1) = 1MHz → 1 count = 1us。
+ * 周期 20000us = 20ms = 50Hz。
+ * 角度 0~270° ↔ 500~2500us。
+ */
+
+/* 外部 TIM4 句柄（main.c 定义并由 MX_TIM4_Init 配置） */
+extern TIM_HandleTypeDef htim4;
+
+void PWM_Servo_SetPulseUs(uint16_t us)
+{
+    if (us < SERVO_PWM_MIN)  us = SERVO_PWM_MIN;   /* 500 */
+    if (us > SERVO_PWM_MAX)  us = SERVO_PWM_MAX;   /* 2500 */
+    /* 1 count = 1us，CCR 直接写脉宽 us 值 */
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, us);
+}
+
+void PWM_Servo_SetAngle(float deg)
+{
+    float us;
+    if (deg < 0.0f)    deg = 0.0f;
+    if (deg > 270.0f)  deg = 270.0f;
+    /* 0~270° 线性映射到 500~2500us：us = 500 + deg * 2000 / 270 */
+    us = 500.0f + deg * (2000.0f / 270.0f);
+    PWM_Servo_SetPulseUs((uint16_t)(us + 0.5f));
 }

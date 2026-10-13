@@ -13,38 +13,42 @@ uint8_t Key_Flag[KEY_COUNT];
 
 /*
  * 矩阵行扫描：逐行拉低，读三列，得到 9 个键的按下状态，写入 state[9]。
- * state 下标 = row*3 + col，与 KEY_START/KEY_DONE/KEY_CALIB 的编号一致。
- * Row_2 占位（硬件暂未接），仍正常扫描，读不到即为未按下，无害。
+ * state 下标 = row*3 + col，与 KEY_TO_A/KEY_TO_B/KEY_TO_C 等编号一致。
+ * 三行引脚可能跨口（Row_1=PE10 / Row_2=PB2 / Row_3=PE7），逐口独立扫描。
  */
 static void Key_ScanMatrix(uint8_t state[KEY_COUNT])
 {
 	uint8_t r, c;
 	GPIO_PinState col;
 
-	/* 行/列引脚（GPIOE 全在一个口，简化操作） */
-	const uint16_t row_pin[KEY_ROWS] = { Key_Row_1_Pin, Key_Row_2_Pin, Key_Row_3_Pin };
-	const uint16_t col_pin[KEY_COLS] = { Key_Col_1_Pin, Key_Col_2_Pin, Key_Col_3_Pin };
+	/* 行/列引脚（引脚可能跨不同 GPIO 口，行/列各用独立 port 数组对齐 pin） */
+	const uint16_t row_pin[KEY_ROWS]  = { Key_Row_1_Pin, Key_Row_2_Pin, Key_Row_3_Pin };
+	const uint16_t col_pin[KEY_COLS]  = { Key_Col_1_Pin, Key_Col_2_Pin, Key_Col_3_Pin };
+	GPIO_TypeDef *row_port[KEY_ROWS]  = { Key_Row_1_GPIO_Port, Key_Row_2_GPIO_Port, Key_Row_3_GPIO_Port };
+	GPIO_TypeDef *col_port[KEY_COLS]  = { Key_Col_1_GPIO_Port, Key_Col_2_GPIO_Port, Key_Col_3_GPIO_Port };
 
 	for (r = 0; r < KEY_ROWS; r++)
 	{
-		/* 1. 当前行拉低，其余行拉高 */
-		HAL_GPIO_WritePin(GPIOE,
-				row_pin[0] | row_pin[1] | row_pin[2],
-				GPIO_PIN_SET);                    /* 全部行先置高 */
-		HAL_GPIO_WritePin(GPIOE, row_pin[r], GPIO_PIN_RESET);   /* 当前行拉低 */
+		/* 1. 当前行拉低，其余行拉高（三行可能跨口，逐口单独写） */
+		for (uint8_t rr = 0; rr < KEY_ROWS; rr++)
+		{
+			HAL_GPIO_WritePin(row_port[rr], row_pin[rr],
+					(rr == r) ? GPIO_PIN_RESET : GPIO_PIN_SET);
+		}
 
 		/* 2. 读三列，列被拉低 = 该键按下 */
 		for (c = 0; c < KEY_COLS; c++)
 		{
-			col = HAL_GPIO_ReadPin(GPIOE, col_pin[c]);
+			col = HAL_GPIO_ReadPin(col_port[c], col_pin[c]);
 			state[r * KEY_COLS + c] = (col == GPIO_PIN_RESET) ? KEY_PRESSED : KEY_UNPRESSED;
 		}
 	}
 
 	/* 扫描结束，所有行恢复高电平，避免误触 */
-	HAL_GPIO_WritePin(GPIOE,
-			row_pin[0] | row_pin[1] | row_pin[2],
-			GPIO_PIN_SET);
+	for (uint8_t rr = 0; rr < KEY_ROWS; rr++)
+	{
+		HAL_GPIO_WritePin(row_port[rr], row_pin[rr], GPIO_PIN_SET);
+	}
 }
 
 uint8_t Key_Check(uint8_t n, uint8_t Flag)
