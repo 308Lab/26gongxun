@@ -99,10 +99,23 @@ void Vision_OnTargetLost(void)
     /* 兑现动作（抬大臂+回上一帧 PWM / 连续 5 次回展开态）由 formal_mode 任务层执行 */
 }
 
-/* 扫码完成（0x11）：阻塞式握手结束 */
-void Vision_OnScanDone(void)
+/* 扫码完成（0x11）：阻塞式握手结束。
+ * 协议 §3.2（2026-10-13 起）带 3 字节 ASCII 三位数，保存下来供 OLED 现场核对；
+ * 不带（旧格式）也照样置 scan_done —— 这个标志才是控制流用的。 */
+void Vision_OnScanDone(const uint8_t *data, uint8_t len)
 {
-    g_vision.scan_done = 1;   /* 置扫码完成标志，供正式模式 A 任务轮询消费 */
+    if ((data != NULL) && (len >= 3U))
+    {
+        g_vision.scan_digits[0]  = data[0];
+        g_vision.scan_digits[1]  = data[1];
+        g_vision.scan_digits[2]  = data[2];
+        g_vision.scan_has_digits = 1;
+    }
+    else
+    {
+        g_vision.scan_has_digits = 0;
+    }
+    g_vision.scan_done = 1;   /* 置扫码完成标志，供任务层轮询消费 */
 }
 
 uint8_t Vision_ConsumeScanDone(void)

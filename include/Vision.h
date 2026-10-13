@@ -95,6 +95,11 @@ typedef struct {
 
     /* 扫码完成（0x11）事件标志：Vision_OnScanDone 置 1，任务层消费后清 0 */
     uint8_t              scan_done;        /* 1=收到扫码完成 */
+    /* 扫码得到的三位数（协议 §3.2，2026-10-13 起随 0x11 回传）。
+     * 只用于【OLED 现场核对"扫到的码 = 抽签的码"】，不参与任何控制流。
+     *   scan_has_digits=0 表示这次回包没带数字（兼容旧格式 LEN=0） */
+    uint8_t              scan_digits[3];   /* ASCII '1'~'3' */
+    uint8_t              scan_has_digits;  /* 1=这次 0x11 带了三位数 */
 
     /* 反恐目标倒下（0x35）事件标志：Vision_OnTargetDown 置 1，任务层开激光后消费 */
     uint8_t              target_down;      /* 1=视觉判靶已倒下（协议 §3.4） */
@@ -129,8 +134,10 @@ void Vision_OnIdentErr(uint8_t err_code);
 /* 目标丢失（0x13）落地：进入视野丢失兜底 */
 void Vision_OnTargetLost(void);
 
-/* 扫码完成（0x11）落地 */
-void Vision_OnScanDone(void);
+/* 扫码完成（0x11）落地。
+ * data/len 是 0x11 的载荷：协议 §3.2（2026-10-13 起）为 3 字节 ASCII 三位数；
+ * len < 3 时按旧格式处理（不带数字），只置 scan_done。 */
+void Vision_OnScanDone(const uint8_t *data, uint8_t len);
 
 /* 反恐目标倒下（0x35）落地：置 target_down 事件标志，任务层据此关激光（协议 §3.4） */
 void Vision_OnTargetDown(void);

@@ -19,6 +19,7 @@
 
 #include "u8g2_port.h"
 #include "task_seq.h"     /* Task_RunAt（操作页的任务入口） */
+#include "Vision.h"       /* g_vision：执行页显示扫码三位数与错误码 */
 #include "Key.h"
 #include "Servo.h"
 
@@ -72,6 +73,62 @@ static uint8_t draw_servo_pwm(mui_t *ui, uint8_t msg)
     return 0;
 }
 
+/* ── 执行页的两行动态文本 ──────────────────────────────────────────────── */
+
+/* 二维码三位数（协议 §3.2，2026-10-13 起随 0x11 回传）。
+ * 用途是现场核对「扫到的码 = 抽签的码」—— 扫错码却一路跑下去是最贵的错。 */
+static uint8_t draw_qr_digits(mui_t *ui, uint8_t msg)
+{
+    if (msg == MUIF_MSG_DRAW)
+    {
+        u8g2_t*     g = mui_get_U8g2(ui);
+        u8g2_uint_t x = mui_get_x(ui);
+        u8g2_uint_t y = mui_get_y(ui);
+        char        buf[28];
+
+        if (g_vision.scan_has_digits != 0U)
+        {
+            (void)snprintf(buf, sizeof(buf), "二维码 %c%c%c",
+                           (char)g_vision.scan_digits[0],
+                           (char)g_vision.scan_digits[1],
+                           (char)g_vision.scan_digits[2]);
+        }
+        else if (g_vision.scan_done != 0U)
+        {
+            (void)snprintf(buf, sizeof(buf), "二维码 未带回");
+        }
+        else
+        {
+            (void)snprintf(buf, sizeof(buf), "二维码 等待中");
+        }
+        u8g2_DrawUTF8(g, x, y, buf);
+    }
+    return 0;
+}
+
+/* 最近一次识别错误（协议 §3.1b 的 0x12 错误码）。 */
+static uint8_t draw_last_error(mui_t *ui, uint8_t msg)
+{
+    if (msg == MUIF_MSG_DRAW)
+    {
+        u8g2_t*     g = mui_get_U8g2(ui);
+        u8g2_uint_t x = mui_get_x(ui);
+        u8g2_uint_t y = mui_get_y(ui);
+        char        buf[28];
+
+        if (g_vision.last_err_code != 0U)
+        {
+            (void)snprintf(buf, sizeof(buf), "错误码 %u", (unsigned)g_vision.last_err_code);
+        }
+        else
+        {
+            (void)snprintf(buf, sizeof(buf), "状态 正常");
+        }
+        u8g2_DrawUTF8(g, x, y, buf);
+    }
+    return 0;
+}
+
 /* ── 自定义字段：启动任务 ────────────────────────────────────────────────
  * 画法与 GOTO 的 _w1_ 一致（整行宽的框 + 左对齐文字），但选中时不跳页，
  * 而是按 fds 里传来的 arg 启动对应任务。
@@ -89,6 +146,11 @@ static uint8_t btn_run_task(mui_t *ui, uint8_t msg)
         /* 从【当前位置】直接去那个点并执行（Ryan 选的方案）——
          * 不跑前面的路，调试时能单独测某个任务。 */
         Task_RunAt((uint8_t)ui->arg);
+
+        /* 紧接着跳到执行页（form 5）：一边跑一边能看扫码结果与报错。
+         * 先 SaveForm 才能用键3 返回（MUI 的返回只存一层，这里用上了）。 */
+        mui_SaveForm(ui);
+        (void)mui_GotoForm(ui, 5, 0);
     }
     return 0;
 }
@@ -108,7 +170,9 @@ static muif_t muif_list[] = {
     UI_MUIF('S', '0', 0, (void *)u8g2_font_wqy12_t_gb2312,
             mui_u8g2_set_font_style_function),
     UI_MUIF('.', 'L', 0, 0, mui_u8g2_draw_text),          /* 静态文本 */
-    UI_MUIF('P', 'W', 0, 0, draw_servo_pwm),              /* 动态只读 */
+    UI_MUIF('P', 'W', 0, 0, draw_servo_pwm),              /* 动态只读：三路舵机 PWM */
+    UI_MUIF('Q', 'R', 0, 0, draw_qr_digits),              /* 动态只读：二维码三位数 */
+    UI_MUIF('E', 'R', 0, 0, draw_last_error),             /* 动态只读：最近错误码 */
     /* ★ 用 _w1_ 变体而不是 _wm_：_wm_ 的框宽是【自动算文字宽度】得到的
      *   （mui_u8g2_draw_button_utf(..., H_CENTER, width=0, is_fixed_width=1, ...)），
      *   而中文字体的 UTF8 宽度在那个路径上没算对 —— 框与文字错开，上机表现为
@@ -153,6 +217,15 @@ MUI_XYAT("TN", 4, 10, 0, "任务A 二维码识别")
 MUI_XYAT("TN", 4, 26, 1, "任务B 小球排爆")
 MUI_XYAT("TN", 4, 42, 2, "任务C 激光反恐")
 MUI_XYAT("TN", 4, 58, 3, "任务D 抓取人质")
+
+/* 任务执行页：从操作页按确认进来（见 btn_run_task），任务同时在跑。
+ * 显示扫码三位数（现场核对用）与最近一次识别错误码。 */
+MUI_FORM(5)
+MUI_STYLE(0)
+MUI_LABEL(4, 10, "任务执行")
+MUI_XY("QR", 4, 26)
+MUI_XY("ER", 4, 42)
+MUI_XYAT("BK", 4, 58, 1, "返回")
 
 MUI_FORM(10)
 MUI_STYLE(0)
@@ -217,6 +290,36 @@ void Ui_Refresh(void)
     U8g2Port_SendBuffer();    /* 全缓冲一次推完，不闪 */
 }
 
+/* 执行页显示的是会变的数据（扫码结果、错误码），但**不能无脑周期刷屏** ——
+ * 软件 I2C 推一屏 1024 字节约 90ms，而 OLEDTask 每 20ms 就跑一次，
+ * 那样两成以上的 CPU 会耗在重画同一幅画面上。
+ * 所以记住上次画过的内容，只有真变了才重画。 */
+static uint8_t s_shown_digits[3] = {0, 0, 0};
+static uint8_t s_shown_scan   = 0xFF;   /* 0xFF = 还没显示过 */
+static uint8_t s_shown_err    = 0xFF;
+
+static uint8_t scan_view_changed(void)
+{
+    if (s_shown_scan != g_vision.scan_has_digits) return 1;
+    if (s_shown_err  != g_vision.last_err_code)   return 1;
+    if (g_vision.scan_has_digits != 0U)
+    {
+        if ((s_shown_digits[0] != g_vision.scan_digits[0]) ||
+            (s_shown_digits[1] != g_vision.scan_digits[1]) ||
+            (s_shown_digits[2] != g_vision.scan_digits[2])) return 1;
+    }
+    return 0;
+}
+
+static void scan_view_mark_shown(void)
+{
+    s_shown_scan = g_vision.scan_has_digits;
+    s_shown_err  = g_vision.last_err_code;
+    s_shown_digits[0] = g_vision.scan_digits[0];
+    s_shown_digits[1] = g_vision.scan_digits[1];
+    s_shown_digits[2] = g_vision.scan_digits[2];
+}
+
 void Ui_Tick(void)
 {
     uint8_t redraw = 0;
@@ -234,8 +337,15 @@ void Ui_Tick(void)
         redraw = 1;
     }
 
+    /* 数据变了也重画（执行页的扫码结果/错误码就是这么刷新的） */
+    if (scan_view_changed() != 0U)
+    {
+        redraw = 1;
+    }
+
     if (redraw != 0U)
     {
         Ui_Refresh();
+        scan_view_mark_shown();
     }
 }

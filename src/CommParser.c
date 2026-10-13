@@ -54,8 +54,8 @@ void CMD_Parse(serial_frame_t *frame)
             break;
 
         /* ================= 全局指令（视觉语义） ================= */
-        case HOST_CMD_SCAN_DONE:      /* 0x11 扫码完成（纯信号） */
-            Vision_OnScanDone();
+        case HOST_CMD_SCAN_DONE:      /* 0x11 扫码完成（协议 §3.2：LEN=3，带三位数） */
+            Vision_OnScanDone(frame->data, frame->len);
             Transmit_Ack(HOST_CMD_SCAN_DONE);
             break;
 
