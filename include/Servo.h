@@ -93,9 +93,13 @@ uint16_t Servo_Read(uint8_t *buf, uint16_t len);  /* 读出已收字节 */
 void Servo_RxCplt(uint8_t byte);                  /* 由接收回调调用，写入缓存 */
 void Servo_RxCpltISR(void);                       /* 中断回调入口 */
 
-/* ---- 指令封装（拼接 ASCII 并发送） ---- */
-void Servo_SetAngle(uint8_t id, uint16_t pwm);                              /* 立即控制位置 */
-void Servo_SetAngleTime(uint8_t id, uint16_t pwm, uint16_t time_ms);        /* 带时间控制位置 */
+/* ---- 指令封装（拼接 ASCII 并发送） ----
+ * ★ 前两个是【含零位偏移】的常规入口，绝大多数调用点用它。
+ *   带 Raw 的是【绕过偏移】的通道：标定自身、回读测试、诊断用（见下方「零位偏移」）。 */
+void Servo_SetAngle(uint8_t id, uint16_t pwm);                              /* 立即控制位置（含偏移） */
+void Servo_SetAngleTime(uint8_t id, uint16_t pwm, uint16_t time_ms);        /* 带时间控制位置（含偏移） */
+void Servo_SetAngleRaw(uint8_t id, uint16_t pwm);                           /* 同上，【不含】偏移 */
+void Servo_SetAngleTimeRaw(uint8_t id, uint16_t pwm, uint16_t time_ms);     /* 同上，【不含】偏移 */
 void Servo_ReadAngle(uint8_t id);                                           /* 请求回读位置 */
 void Servo_ReadTempVolt(uint8_t id);                                       /* 请求回读温度+电压 */
 void Servo_ProbeId(uint8_t id);                                             /* 探测 ID 是否在线 */
@@ -130,8 +134,24 @@ servo_reply_t Servo_GetReply(void);       /* 取出最新解析结果 */
  */
 int Servo_IsReached(uint8_t id, uint16_t target_pwm, uint16_t tol);
 
-/** 最近一次读回的 PWM；0 = 该 ID 还没读到过。给 UI 显示用。 */
+/** 最近一次读回的 PWM；0 = 该 ID 还没读到过。给 UI 显示用。
+ *  ★ 返回【原始】实测值，不含零位偏移 —— 标定要靠它读舵机的真实物理位置。 */
 uint16_t Servo_LastPos(uint8_t id);
+
+/* ---- 零位偏移（机械臂整体平移） ----
+ * 标定时把机械臂摆到收起态、记下实测 PWM，偏移 = 记忆值 − arm_config 的收起态基准。
+ * 之后所有下发与到位判据都自动带上它。恒等时全 0，行为与不启用时完全一致。
+ * 持久化由 param_store 负责（掉电保存）。 */
+void    Servo_SetZeroOffset(uint8_t id, int16_t off);
+int16_t Servo_GetZeroOffset(uint8_t id);
+void    Servo_ClearZeroOffset(void);   /* 全部归零（参数校验失败时的回退路径） */
+
+/* ---- 三路臂舵机（P1/P2/P3）的力矩使能 ----
+ * 标定时要人工摆臂，而舵机通电时是抱死的、掰不动，所以先失力。
+ * ★ 状态只能靠软件跟踪：舵机的锁定状态在它自己内部，协议里没有查询命令。
+ *   上电默认「有力」（舵机上电即保持），与硬件一致。 */
+void    Servo_SetArmTorque(uint8_t on);   /* 1=锁定(有力)，0=失力(可手动摆) */
+uint8_t Servo_GetArmTorque(void);         /* 1=有力，0=失力 */
 
 /* ==================== 外部变量 ==================== */
 extern volatile servo_reply_t servo_last_reply;            /* 最近一次解析结果（跨任务共享，volatile） */

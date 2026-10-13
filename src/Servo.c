@@ -94,10 +94,83 @@ void Servo_RxCpltISR(void)
     Servo_RxCplt(s_rx_byte);
 }
 
+/* ==================== 零位偏移（机械臂整体平移） ==================== */
+/*
+ * 为什么偏移加在【这一层】：
+ *   全仓所有舵机角度下发最终都汇聚到下面的 Servo_SetAngle / Servo_SetAngleTime，
+ *   到位判据则汇聚到 Servo_IsReached。在最底层加，调用点一行都不用改，也就不会漏 ——
+ *   这正是"重装机械臂后无需重标 20 多个姿态"能成立的地方。
+ *
+ * ★ Servo_LastPos() 【不】加偏移：标定要靠它读舵机的真实物理位置。
+ * ★ 标定自身 / 回读测试 / 诊断 —— 走 *_Raw 版本（绕过偏移，避免自我叠加）。
+ *
+ * 语义（2026-10-14 定）：标定时把机械臂摆到【收起态】，记下三路实测 PWM；
+ *   偏移 = 记忆值 − arm_config 里的收起态基准（ARM_POSE_STOW_*）。
+ *   机械装配偏了 → 偏移非零 → 所有姿态跟着一起平移。恒等时全 0，行为与不启用时一致。
+ */
+static int16_t s_zero_offset[SERVO_POS_CACHE_N];
+
+/* 加偏移并钳到舵机行程内 */
+static uint16_t apply_zero_offset(uint8_t id, uint16_t pwm)
+{
+    int32_t v;
+
+    if (id >= SERVO_POS_CACHE_N) return pwm;   /* 超出缓存范围的 ID：不加偏移 */
+    v = (int32_t)pwm + (int32_t)s_zero_offset[id];
+    if (v > (int32_t)SERVO_PWM_MAX) v = (int32_t)SERVO_PWM_MAX;
+    if (v < (int32_t)SERVO_PWM_MIN) v = (int32_t)SERVO_PWM_MIN;
+    return (uint16_t)v;
+}
+
+void Servo_SetZeroOffset(uint8_t id, int16_t off)
+{
+    if (id < SERVO_POS_CACHE_N) s_zero_offset[id] = off;
+}
+
+int16_t Servo_GetZeroOffset(uint8_t id)
+{
+    return (id < SERVO_POS_CACHE_N) ? s_zero_offset[id] : (int16_t)0;
+}
+
+void Servo_ClearZeroOffset(void)
+{
+    uint8_t i;
+    for (i = 0; i < SERVO_POS_CACHE_N; i++) s_zero_offset[i] = (int16_t)0;
+}
+
+/* ==================== 三路臂舵机的力矩使能 ==================== */
+/* 标定时要人工摆臂，而舵机通电时是抱死的、掰不动 —— 先失力。
+ * ★ 状态只能软件跟踪：锁定状态在舵机自己内部，协议里没有查询命令。
+ *   上电默认「有力」，与硬件一致（舵机上电即保持位置）。 */
+static uint8_t s_arm_torque = 1u;
+
+void Servo_SetArmTorque(uint8_t on)
+{
+    uint8_t i;
+
+    for (i = 0u; i < 3u; i++)
+    {
+        if (on != 0u)
+        {
+            Servo_Lock((uint8_t)(i + 1u));
+        }
+        else
+        {
+            Servo_Unlock((uint8_t)(i + 1u));
+        }
+    }
+    s_arm_torque = (on != 0u) ? 1u : 0u;
+}
+
+uint8_t Servo_GetArmTorque(void)
+{
+    return s_arm_torque;
+}
+
 /* ==================== 指令封装 ==================== */
 
-/* 控制位置：#<ID>P<PWM>!  （立即） */
-void Servo_SetAngle(uint8_t id, uint16_t pwm)
+/* 控制位置：#<ID>P<PWM>!  （立即，【不含】零位偏移） */
+void Servo_SetAngleRaw(uint8_t id, uint16_t pwm)
 {
     char cmd[16];
     if (pwm > SERVO_PWM_MAX) pwm = SERVO_PWM_MAX;
@@ -106,8 +179,14 @@ void Servo_SetAngle(uint8_t id, uint16_t pwm)
     Servo_SendString(cmd);
 }
 
-/* 控制位置 + 时间：#<ID>P<PWM>T<TIME>! */
-void Servo_SetAngleTime(uint8_t id, uint16_t pwm, uint16_t time_ms)
+/* 控制位置：#<ID>P<PWM>!  （立即，含零位偏移） */
+void Servo_SetAngle(uint8_t id, uint16_t pwm)
+{
+    Servo_SetAngleRaw(id, apply_zero_offset(id, pwm));
+}
+
+/* 控制位置 + 时间：#<ID>P<PWM>T<TIME>!  （【不含】零位偏移） */
+void Servo_SetAngleTimeRaw(uint8_t id, uint16_t pwm, uint16_t time_ms)
 {
     char cmd[24];
     if (pwm > SERVO_PWM_MAX) pwm = SERVO_PWM_MAX;
@@ -115,6 +194,12 @@ void Servo_SetAngleTime(uint8_t id, uint16_t pwm, uint16_t time_ms)
     if (time_ms > SERVO_TIME_MAX) time_ms = SERVO_TIME_MAX;
     snprintf(cmd, sizeof(cmd), "#%03uP%04uT%04u!", id, pwm, time_ms);
     Servo_SendString(cmd);
+}
+
+/* 控制位置 + 时间：#<ID>P<PWM>T<TIME>!  （含零位偏移） */
+void Servo_SetAngleTime(uint8_t id, uint16_t pwm, uint16_t time_ms)
+{
+    Servo_SetAngleTimeRaw(id, apply_zero_offset(id, pwm), time_ms);
 }
 
 /* 请求回读位置：#<ID>PRAD! */
@@ -219,13 +304,19 @@ static volatile uint16_t s_servo_pos[SERVO_POS_CACHE_N];
 int Servo_IsReached(uint8_t id, uint16_t target_pwm, uint16_t tol)
 {
     uint16_t cur;
+    uint16_t tgt;
     int32_t  diff;
 
     if (id == 0 || id >= SERVO_POS_CACHE_N) return -1;  /* 不缓存这个 ID */
     cur = s_servo_pos[id];
     if (cur == 0) return -1;                            /* 还没读到过 —— 不能判"到位" */
 
-    diff = (int32_t)cur - (int32_t)target_pwm;
+    /* ★ 目标值必须加【同一个】零位偏移：`cur` 是舵机实际 PWM，而 target 是调用方从
+     *   arm_config 传进来的原始值。下发时加了偏移、这里不加，两者就永远差着那个量 ——
+     *   判据静默失效，而任务靠 timeout 照样能跑完，极难发现。 */
+    tgt = apply_zero_offset(id, target_pwm);
+
+    diff = (int32_t)cur - (int32_t)tgt;
     if (diff < 0) diff = -diff;
     return (diff <= (int32_t)tol) ? 1 : 0;
 }

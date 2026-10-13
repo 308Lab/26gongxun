@@ -27,6 +27,7 @@
 #include "Servo.h"
 #include "arm_config.h"
 #include "arm_kinematics.h"
+#include "arm_zero.h"
 #include "Vision.h"
 #include "task_seq.h"
 #include "ui_form.h"
@@ -255,9 +256,13 @@ int main(void)
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
 
-  /* 启动 PWM 舵机（PD12/TIM4_CH1，50Hz，500~2500us ↔ 0~270°） */
+  /* 启动 PWM 舵机（TIM4_CH4，50Hz，500~2500us ↔ 0~270°）。
+   * ★ 上电【不再】写归位角度（2026-10-14）：写 135° 会让夹爪舵机一直抱死在中性位，
+   *   堵转电流大、发热烧机。现在 CCR 保持 MX_TIM4_Init 里的 Pulse=0 → 无脉冲输出，
+   *   舵机进自由态、零电流。夹爪角度只在任务里由 ACT_GRIP 写（task_seq.c），
+   *   不跑 B/D 任务就完全不动。
+   * ⚠️ 待办：任务里 ACT_GRIP 夹紧后同样会一直顶死，需按熄火策略处理（见讨论）。 */
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
-  PWM_Servo_SetAngle(135.0f);   /* 上电归位：夹爪置 135° 中性位 */
 
   /* USER CODE END 2 */
 
@@ -878,7 +883,8 @@ void StartMainTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
   Control_Init();
-  Arm_Init();   /* 步进电机 Emm_V5：绑定 USART1 + 启动接收 */
+  ArmZero_Init();   /* 从 Flash 载入零位偏移 —— 必须在任何任务下发舵机角度之前 */
+  Arm_Init();       /* 步进电机 Emm_V5：绑定 USART1 + 启动接收 */
 
   /* ========================================================================
    * 【步进电机·按键触发读参数 + 解析｜临时桩】

@@ -13,11 +13,6 @@ void Control_Init (void)
     Servo_UartInit();
 }
 
-void EASL_SetServo_Pos(uint16_t addr, int16_t Pos, uint16_t time)
-{
-    /* 重写后：总线舵机直接按 PWM 值控制（1500 为中值），无需切模式 */
-    int32_t pwm = 1500 + Pos;
-    if (pwm > 2500) pwm = 2500;
-    if (pwm < 500)  pwm = 500;
-    Servo_SetAngleTime((uint8_t)addr, (uint16_t)pwm, time);
-}
+/* （2026-10-14 删除 EASL_SetServo_Pos：全仓无调用者的死代码，且它的入参语义
+ *   ——「相对 1500 中值的偏移」—— 与新的零位偏移容易混淆。舵机下发统一走
+ *   Servo_SetAngleTime / Servo_SetAngle，见 Servo.h。） */

@@ -26,9 +26,7 @@
 #define BUS_SERVO_002_RESERVE 0
 #define BUS_SERVO_003_RESERVE 0
 
-void EASL_SetServo_Pos(uint16_t addr, int16_t Pos, uint16_t time);
-
-
+/* EASL_SetServo_Pos() 已于 2026-10-14 删除（死代码，语义与新零位偏移冲突）。 */
 
 void Control_Init (void);
 

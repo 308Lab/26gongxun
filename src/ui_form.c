@@ -20,7 +20,8 @@
 #include "u8g2_port.h"
 #include "task_seq.h"     /* Task_RunAt（操作页的任务入口） */
 #include "Vision.h"       /* g_vision：执行页显示扫码三位数与错误码 */
-#include "Key.h"
+#include "arm_zero.h"     /* 标定页：记录零位 / 查询是否已标定 */
+#include "Key.h"          /* KEY_CALIB = 物理键 9（标定页的使能/失能） */
 #include "Servo.h"
 
 #include "u8g2.h"
@@ -129,6 +130,125 @@ static uint8_t draw_last_error(mui_t *ui, uint8_t msg)
     return 0;
 }
 
+/* ── 标定页（form 11）的字段 ───────────────────────────────────────────── */
+
+/* 上次「记忆为零位」的结果，供状态行显示失败原因（0=成功或还没按过） */
+static int s_zero_rc = 0;
+
+/* 三路实测 PWM 挤在一行。
+ * 尺寸账：wqy12 的中文是全角、ASCII 是半角（数字步进 6px），
+ * 所以 "1:1976 2:2425 3:1762" 这 19 个字符约 109px，128px 宽放得下 —— 不需要另换字体。 */
+static uint8_t draw_zero_pwms(mui_t *ui, uint8_t msg)
+{
+    if (msg == MUIF_MSG_DRAW)
+    {
+        u8g2_t*  g = mui_get_U8g2(ui);
+        char     buf[28];
+        uint16_t a = Servo_LastPos(1);
+        uint16_t b = Servo_LastPos(2);
+        uint16_t c = Servo_LastPos(3);
+
+        if ((a != 0U) && (b != 0U) && (c != 0U))
+        {
+            (void)snprintf(buf, sizeof(buf), "1:%u 2:%u 3:%u",
+                           (unsigned)a, (unsigned)b, (unsigned)c);
+        }
+        else
+        {
+            (void)snprintf(buf, sizeof(buf), "回读中 请稍候");   /* 三路都读到才显示 */
+        }
+        u8g2_DrawUTF8(g, mui_get_x(ui), mui_get_y(ui), buf);
+    }
+    return 0;
+}
+
+/* 当前生效的偏移量；按下记忆键失败时改为显示原因。
+ * 未标定要明确写出来 —— 免得对着全 0 的偏移猜"到底标上没有"。 */
+static uint8_t draw_zero_offset(mui_t *ui, uint8_t msg)
+{
+    if (msg == MUIF_MSG_DRAW)
+    {
+        u8g2_t* g = mui_get_U8g2(ui);
+        char    buf[28];
+
+        if (s_zero_rc == -1)
+        {
+            (void)snprintf(buf, sizeof(buf), "回读无效 稍候再试");
+        }
+        else if (s_zero_rc == -2)
+        {
+            (void)snprintf(buf, sizeof(buf), "偏移超限 没摆到位?");
+        }
+        else if (s_zero_rc == -3)
+        {
+            (void)snprintf(buf, sizeof(buf), "Flash 写入失败");
+        }
+        else if (ArmZero_IsCalibrated() != 0U)
+        {
+            (void)snprintf(buf, sizeof(buf), "偏 %+d %+d %+d",
+                           (int)Servo_GetZeroOffset(1),
+                           (int)Servo_GetZeroOffset(2),
+                           (int)Servo_GetZeroOffset(3));
+        }
+        else
+        {
+            (void)snprintf(buf, sizeof(buf), "未标定（出厂零位）");
+        }
+        u8g2_DrawUTF8(g, mui_get_x(ui), mui_get_y(ui), buf);
+    }
+    return 0;
+}
+
+/* 舵机力矩状态。★ 这是【安全信息】，必须常驻可见 —— 失力时臂会因自重垮下来。 */
+static uint8_t draw_lock_state(mui_t *ui, uint8_t msg)
+{
+    if (msg == MUIF_MSG_DRAW)
+    {
+        u8g2_t* g = mui_get_U8g2(ui);
+        u8g2_DrawUTF8(g, mui_get_x(ui), mui_get_y(ui),
+                      (Servo_GetArmTorque() != 0U) ? "已锁定(键9失力)" : "已失力 可摆臂");
+    }
+    return 0;
+}
+
+/* 记忆为零位：读三路【原始】回读值交给 ArmZero_Record，成功后立即恢复力矩。
+ * 画法与 GOTO 的 _w1_ 一致（整行宽），选中时不跳页。 */
+static uint8_t btn_zero_record(mui_t *ui, uint8_t msg)
+{
+    if (msg == MUIF_MSG_DRAW)
+    {
+        u8g2_t* g = mui_get_U8g2(ui);
+        mui_u8g2_draw_button_fi(ui, u8g2_GetDisplayWidth(g) - mui_get_x(ui) * 2U,
+                                mui_get_x(ui) - 1U, ui->text);
+    }
+    else if (msg == MUIF_MSG_CURSOR_SELECT)
+    {
+        uint16_t raw[3];
+        raw[0] = Servo_LastPos(1);
+        raw[1] = Servo_LastPos(2);
+        raw[2] = Servo_LastPos(3);
+        s_zero_rc = ArmZero_Record(raw);
+        if (s_zero_rc == 0)
+        {
+            Servo_SetArmTorque(1U);   /* 记完立即上力，别让它一直瘫着 */
+        }
+    }
+    return 0;
+}
+
+/* 隐藏字段：离开本页（物理键 3 返回、或任何 GOTO）时自动恢复力矩。
+ * MUI 的 mui_LeaveForm 会对当前表单的每个字段派发 MUIF_MSG_FORM_END，挂这里正合适。
+ * 防的是"解了锁、摆完臂、忘了按记忆就退出"—— 那时臂是瘫的。 */
+static uint8_t zero_form_end(mui_t *ui, uint8_t msg)
+{
+    (void)ui;
+    if (msg == MUIF_MSG_FORM_END)
+    {
+        Servo_SetArmTorque(1U);
+    }
+    return 0;
+}
+
 /* ── 自定义字段：启动任务 ────────────────────────────────────────────────
  * 画法与 GOTO 的 _w1_ 一致（整行宽的框 + 左对齐文字），但选中时不跳页，
  * 而是按 fds 里传来的 arg 启动对应任务。
@@ -173,6 +293,13 @@ static muif_t muif_list[] = {
     UI_MUIF('P', 'W', 0, 0, draw_servo_pwm),              /* 动态只读：三路舵机 PWM */
     UI_MUIF('Q', 'R', 0, 0, draw_qr_digits),              /* 动态只读：二维码三位数 */
     UI_MUIF('E', 'R', 0, 0, draw_last_error),             /* 动态只读：最近错误码 */
+    /* 标定页（form 11）。前缀 'Z' 与上面各字段不冲突。 */
+    UI_MUIF('Z', 'P', 0, 0, draw_zero_pwms),              /* 动态只读：三路实测 PWM（挤一行） */
+    UI_MUIF('Z', 'O', 0, 0, draw_zero_offset),            /* 动态只读：当前偏移量 / 报错 */
+    UI_MUIF('Z', 'S', 0, 0, draw_lock_state),             /* 动态只读：舵机力矩状态（安全信息） */
+    UI_MUIF('Z', 'M', MUIF_CFLAG_IS_CURSOR_SELECTABLE, 0,
+            btn_zero_record),                             /* 记忆为零位（动作按钮） */
+    UI_MUIF('Z', 'E', 0, 0, zero_form_end),               /* 隐藏：离开本页自动恢复力矩 */
     /* ★ 用 _w1_ 变体而不是 _wm_：_wm_ 的框宽是【自动算文字宽度】得到的
      *   （mui_u8g2_draw_button_utf(..., H_CENTER, width=0, is_fixed_width=1, ...)），
      *   而中文字体的 UTF8 宽度在那个路径上没算对 —— 框与文字错开，上机表现为
@@ -227,11 +354,25 @@ MUI_XY("QR", 4, 26)
 MUI_XY("ER", 4, 42)
 MUI_XYAT("BK", 4, 58, 1, "返回")
 
+/* 标定菜单：目前只有零位标定一项。第三行是常驻提示 —— θ1 是增量式步进、无绝对零点，
+ * 它的"零位"就是开机位置，只能靠人保证（详见 arm_config.h 的 D 段）。 */
 MUI_FORM(10)
 MUI_STYLE(0)
 MUI_LABEL(4, 10, "标定")
-MUI_LABEL(4, 26, "待迁移")
+MUI_GOTO(4, 26, 11, "零位标定")
+MUI_LABEL(4, 42, "θ1零位=开机位")
 MUI_XYAT("BK", 4, 58, 1, "返回")
+
+/* 零位标定页：把臂摆到收起态后按【记忆为零位】。
+ * · 使能/失能走【物理键 9】（KEY_CALIB），不占屏幕行 —— 见 Ui_Tick。
+ * · 本页不排"返回"行：物理键 3 就是全局返回（Ui_Tick 里无条件处理）。 */
+MUI_FORM(11)
+MUI_STYLE(0)
+MUI_XY("ZP", 4, 10)
+MUI_XY("ZO", 4, 26)
+MUI_XY("ZS", 4, 42)
+MUI_XYAT("ZM", 4, 58, 0, "记忆为零位")
+MUI_XY("ZE", 0, 0)      /* 隐藏字段：只为接 FORM_END（离开本页自动恢复力矩） */
 
 MUI_FORM(20)
 MUI_STYLE(0)
@@ -290,16 +431,34 @@ void Ui_Refresh(void)
     U8g2Port_SendBuffer();    /* 全缓冲一次推完，不闪 */
 }
 
-/* 执行页显示的是会变的数据（扫码结果、错误码），但**不能无脑周期刷屏** ——
- * 软件 I2C 推一屏 1024 字节约 90ms，而 OLEDTask 每 20ms 就跑一次，
- * 那样两成以上的 CPU 会耗在重画同一幅画面上。
- * 所以记住上次画过的内容，只有真变了才重画。 */
-static uint8_t s_shown_digits[3] = {0, 0, 0};
-static uint8_t s_shown_scan   = 0xFF;   /* 0xFF = 还没显示过 */
-static uint8_t s_shown_err    = 0xFF;
+/* ── 重画节流：页面「内容签名」变了才重画 ────────────────────────────────
+ *
+ * 软件 I2C 推一屏 1024 字节约 90ms，而 OLEDTask 每 20ms 就跑一次 ——
+ * 无脑周期重画会吃掉两成以上 CPU。所以记住上次画过的内容，只有真变了才重画。
+ *
+ * ★ 2026-10-14 修（Ryan 上机发现）：原先只比较【扫码】相关的三个量，于是「状态」页
+ *   （三路舵机 PWM）进去后画一次就再也不刷新。判据扩成覆盖所有会变的页面元素。
+ *   标定页也要显示实时 PWM，会踩同一个坑，所以这里是通用修复、不是给状态页打补丁。
+ *
+ * ★ 舵机 PWM 带 ±1 回读抖动（回读值由 50ms 轮询更新），必须留死区 ——
+ *   否则静止时也会反复重画，把上面那个 90ms/屏 的代价一直付着。 */
+#define UI_PWM_DEADBAND  2U
 
-static uint8_t scan_view_changed(void)
+static uint8_t  s_shown_digits[3] = {0, 0, 0};
+static uint8_t  s_shown_scan   = 0xFF;   /* 0xFF = 还没显示过 */
+static uint8_t  s_shown_err    = 0xFF;
+static uint16_t s_shown_pwm[3] = {0, 0, 0};
+
+/* 两个 PWM 是否【明显】不同（超出死区） */
+static uint8_t pwm_differs(uint16_t a, uint16_t b)
 {
+    return (uint8_t)(((a > b) ? (a - b) : (b - a)) > UI_PWM_DEADBAND);
+}
+
+static uint8_t page_view_changed(void)
+{
+    uint8_t i;
+
     if (s_shown_scan != g_vision.scan_has_digits) return 1;
     if (s_shown_err  != g_vision.last_err_code)   return 1;
     if (g_vision.scan_has_digits != 0U)
@@ -308,16 +467,26 @@ static uint8_t scan_view_changed(void)
             (s_shown_digits[1] != g_vision.scan_digits[1]) ||
             (s_shown_digits[2] != g_vision.scan_digits[2])) return 1;
     }
+
+    /* 三路舵机实测 PWM：状态页（form 2）与标定页（form 11）都靠它刷新。
+     * Servo_LastPos 返回 0 = "还没读到过"，0 → 实测值 同样会触发重画。 */
+    for (i = 0; i < 3U; i++)
+    {
+        if (pwm_differs(s_shown_pwm[i], Servo_LastPos((uint8_t)(i + 1U))) != 0U) return 1;
+    }
     return 0;
 }
 
-static void scan_view_mark_shown(void)
+static void page_view_mark_shown(void)
 {
+    uint8_t i;
+
     s_shown_scan = g_vision.scan_has_digits;
     s_shown_err  = g_vision.last_err_code;
     s_shown_digits[0] = g_vision.scan_digits[0];
     s_shown_digits[1] = g_vision.scan_digits[1];
     s_shown_digits[2] = g_vision.scan_digits[2];
+    for (i = 0; i < 3U; i++) s_shown_pwm[i] = Servo_LastPos((uint8_t)(i + 1U));
 }
 
 void Ui_Tick(void)
@@ -337,8 +506,24 @@ void Ui_Tick(void)
         redraw = 1;
     }
 
-    /* 数据变了也重画（执行页的扫码结果/错误码就是这么刷新的） */
-    if (scan_view_changed() != 0U)
+    /* 键 9（物理键 9 = 编号 2 = KEY_CALIB）：三路臂舵机 锁定 ⇄ 失力，供标定时手动摆臂。
+     *
+     * ★ 必须【无条件读取】把它消费掉：Key_Check 读到即清、不读不清。若只在标定页读，
+     *   在别的页面按下的那一次会一直挂着，等进了标定页时才补触发 —— 机械臂会突然垮下来。
+     *   所以读取无条件，只有【动作】才判当前页面。
+     * ★ 限定在 form 11：任务跑一半误按 9 会导致失力、臂自重砸下，这是最贵的错。 */
+    if (Key_Check(KEY_CALIB, KEY_DOWN) != 0U)
+    {
+        if (mui_GetCurrentFormId(&s_mui) == 11)
+        {
+            Servo_SetArmTorque((uint8_t)((Servo_GetArmTorque() == 0U) ? 1U : 0U));
+            s_zero_rc = 0;   /* 清了上次的报错，免得占着状态行 */
+            redraw = 1;
+        }
+    }
+
+    /* 页面内容变了也重画（执行页的扫码结果、状态页/标定页的三路 PWM 都靠这条刷新） */
+    if (page_view_changed() != 0U)
     {
         redraw = 1;
     }
@@ -346,6 +531,6 @@ void Ui_Tick(void)
     if (redraw != 0U)
     {
         Ui_Refresh();
-        scan_view_mark_shown();
+        page_view_mark_shown();
     }
 }
