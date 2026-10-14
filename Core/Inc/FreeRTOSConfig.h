@@ -64,13 +64,24 @@
 #define configTICK_RATE_HZ                       ((TickType_t)1000)
 #define configMAX_PRIORITIES                     ( 56 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-#define configTOTAL_HEAP_SIZE                    ((size_t)8192)
+/* FreeRTOS 堆（heap_4，静态 ucHeap 数组）。★ 2026-10-14 由 8192 提到 16384：
+ * 任务栈全部从这里分配，而本轮把栈总量提到 10 任务 = 11264B（Main/OLED 各 1536，
+ * 其余 8 个各 1024）+ 定时器任务栈 1024B ≈ 12288B —— 原来的 8192 装不下，
+ * osThreadNew 会分配失败并触发 configASSERT 停机。RAM 只用 24%，放大后约 36%。 */
+#define configTOTAL_HEAP_SIZE                    ((size_t)16384)
+/* 栈溢出检测（2026-10-14 开）。
+ * 值 2 = 除"栈末尾哨兵值"外，还在任务切换时检查当前栈指针是否已越界（更严）。
+ * ★ 为什么必须开：此前为 0（不检测），而 OLEDTask 只有 512B 栈、子页面绘制
+ *   （mui + u8g2 字库 + snprintf ≈ 400+ 字节）会静默踩穿相邻内存 —— 表现为
+ *   "子页面按键卡死"，且非确定性，极难定位。开了之后由 vApplicationStackOverflowHook
+ *   当场抓住（实现见 src/cubemx/main.c）。 */
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configUSE_TRACE_FACILITY                 1
 #define configUSE_16_BIT_TICKS                   0
 #define configUSE_MUTEXES                        1
 #define configQUEUE_REGISTRY_SIZE                8
 #define configUSE_RECURSIVE_MUTEXES              1
+#define configCHECK_FOR_STACK_OVERFLOW           2
 #define configUSE_COUNTING_SEMAPHORES            1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION  0
 

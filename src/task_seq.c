@@ -76,12 +76,12 @@ static void snap_pwm(uint8_t id1, uint16_t p1, uint8_t id2, uint16_t p2)
     if (id2 >= 1U && id2 <= 3U) s_prev_pwm[id2 - 1] = p2;
 }
 
-/** 回到上一帧位姿（视野丢失兜底的第一步）。 */
+/** 回到上一帧位姿（视野丢失兜底的第一步）。三路同步，别一个接一个地爬回去。 */
 static void restore_prev_pwm(void)
 {
-    Servo_SetAngleTime(ARM_TH2_ID, s_prev_pwm[0], 200);
-    Servo_SetAngleTime(ARM_TH3_ID, s_prev_pwm[1], 200);
-    Servo_SetAngleTime(ARM_TH4_ID, s_prev_pwm[2], 200);
+    const uint8_t  ids[3]  = { ARM_TH2_ID, ARM_TH3_ID, ARM_TH4_ID };
+    const uint16_t pwms[3] = { s_prev_pwm[0], s_prev_pwm[1], s_prev_pwm[2] };
+    Servo_SyncMove(3u, ids, pwms, 200u);
 }
 
 /* ============================================================
@@ -145,9 +145,12 @@ static int8_t servo_step_once(void)
 
             snap_pwm(ARM_TH2_ID, p2, ARM_TH3_ID, p3);
             s_prev_pwm[2] = p4;
-            Servo_SetAngleTime(ARM_TH2_ID, p2, 50);
-            Servo_SetAngleTime(ARM_TH3_ID, p3, 50);
-            Servo_SetAngleTime(ARM_TH4_ID, p4, 50);
+            /* 伺服每帧的三个关节增量必须一起动 —— 逐个发会让末端走折线而不是直线 */
+            {
+                const uint8_t  ids[3]  = { ARM_TH2_ID, ARM_TH3_ID, ARM_TH4_ID };
+                const uint16_t pwms[3] = { p2, p3, p4 };
+                Servo_SyncMove(3u, ids, pwms, 50u);
+            }
         }
     }
     return 0;
@@ -167,9 +170,11 @@ static uint8_t lost_fallback(uint16_t deploy_p2, uint16_t deploy_p3, uint16_t de
         s_lost_cnt = 0;
         snap_pwm(ARM_TH2_ID, deploy_p2, ARM_TH3_ID, deploy_p3);
         s_prev_pwm[2] = deploy_p4;
-        Servo_SetAngleTime(ARM_TH2_ID, deploy_p2, 1000);
-        Servo_SetAngleTime(ARM_TH3_ID, deploy_p3, 1000);
-        Servo_SetAngleTime(ARM_TH4_ID, deploy_p4, 1000);
+        {
+            const uint8_t  ids[3]  = { ARM_TH2_ID, ARM_TH3_ID, ARM_TH4_ID };
+            const uint16_t pwms[3] = { deploy_p2, deploy_p3, deploy_p4 };
+            Servo_SyncMove(3u, ids, pwms, 1000u);
+        }
         return 1;
     }
 
@@ -210,15 +215,23 @@ static void step_begin(const tstep_t* st)
             break;
 
         case ACT_SERVO2:
-            Servo_SetAngleTime(st->sid1, st->spwm1, st->stime_ms);
-            Servo_SetAngleTime(st->sid2, st->spwm2, st->stime_ms);
+            /* 同步下发：两个关节走同一条时间轴、同时启动。
+             * 逐条发的话舵机各按收到时刻启动，且每条都要切一次半双工方向
+             * （中间零等待 → 后一条首字节有被削的风险），看起来就是"逐个动"。 */
+            {
+                const uint8_t  ids[2]  = { st->sid1, st->sid2 };
+                const uint16_t pwms[2] = { st->spwm1, st->spwm2 };
+                Servo_SyncMove(2u, ids, pwms, st->stime_ms);
+            }
             snap_pwm(st->sid1, st->spwm1, st->sid2, st->spwm2);
             break;
 
         case ACT_SERVO3:
-            Servo_SetAngleTime(st->sid1, st->spwm1, st->stime_ms);
-            Servo_SetAngleTime(st->sid2, st->spwm2, st->stime_ms);
-            Servo_SetAngleTime(st->sid3, st->spwm3, st->stime_ms);
+            {
+                const uint8_t  ids[3]  = { st->sid1, st->sid2, st->sid3 };
+                const uint16_t pwms[3] = { st->spwm1, st->spwm2, st->spwm3 };
+                Servo_SyncMove(3u, ids, pwms, st->stime_ms);
+            }
             snap_pwm(st->sid1, st->spwm1, st->sid2, st->spwm2);
             if (st->sid3 >= 1U && st->sid3 <= 3U) s_prev_pwm[st->sid3 - 1] = st->spwm3;
             break;
@@ -252,7 +265,22 @@ static void step_begin(const tstep_t* st)
             }
             break;
 
-        case ACT_VIS_SCAN:          Vision_ReqScan();                     break;
+        /* 舵机 + θ1 步进同拍：两个动作各发各的、同时开始。
+         * 这一步的"同时"是名副其实的 —— 舵机走 UART4、步进走 USART1，互不阻塞。 */
+        case ACT_SERVO1_STEP:
+            Servo_SetAngleTime(st->sid1, st->spwm1, st->stime_ms);
+            snap_pwm(st->sid1, st->spwm1, 0, 0);
+            {
+                const int32_t delta = st->pulses - g_step_accum_pulses;
+                if (delta > 0)      { Arm_MoveRelative((uint32_t)delta, ARM_DIR_CW);   g_step_accum_pulses = st->pulses; }
+                else if (delta < 0) { Arm_MoveRelative((uint32_t)(-delta), ARM_DIR_CCW); g_step_accum_pulses = st->pulses; }
+            }
+            break;
+
+        /* ★ 先清掉上一轮可能残留的 scan_done，再发请求。否则"上一次扫码的完成标志"
+         *   会让这一步立刻判成完成 —— 这一轮实际根本没扫。 */
+        case ACT_VIS_SCAN:          (void)Vision_ConsumeScanDone();
+                                    Vision_ReqScan();                     break;
         case ACT_VIS_OBS3_A:
         case ACT_VIS_OBS3_C:        Vision_ObsThree((st->act == ACT_VIS_OBS3_A)
                                                         ? VISION_SERIES_A : VISION_SERIES_C);
@@ -268,6 +296,13 @@ static void step_begin(const tstep_t* st)
         case ACT_VIS_STOP_BUCKET:   Vision_PlaceStop();                     break;
 
         case ACT_CAR_AIM:           break;   /* 每拍在 step_done 里推进，见 car_aim_step */
+
+        /* 减速扫描（放在任务里，见 task_seq.h 的说明）。
+         * scan 是"置位式"动作：Scan_Start 立即 active=1，走满距离后自动刹车→active=0。
+         * 与 ACT_CAR_AIM 不同，这里【不消费视觉数据】，纯靠 Scan_IsActive() 判完成。
+         * Scan_Start 由引擎在进入本步时【只调一次】（step_begin 有 s_begun 守卫），
+         * 不会每拍重置扫描进度。heading=0：A 是扫描起点，不锁航向。 */
+        case ACT_CAR_SCAN:          Scan_Start((float)st->arg, 0.0f);   break;
 
         case ACT_LASER_ON:
             HAL_GPIO_WritePin(Laser_GPIO_Port, Laser_Pin, GPIO_PIN_SET);
@@ -290,6 +325,11 @@ static uint8_t step_done(const tstep_t* st)
     {
         case ACT_SERVO1:
             return (uint8_t)(Servo_IsReached(st->sid1, st->spwm1, TSEQ_SERVO_TOL) == 1);
+
+        /* 舵机到位【且】θ1 到位才算完成（两者同拍启动、各自收敛）。 */
+        case ACT_SERVO1_STEP:
+            return (uint8_t)((Servo_IsReached(st->sid1, st->spwm1, TSEQ_SERVO_TOL) == 1) &&
+                             (Arm_IsReached() == 1));
 
         case ACT_SERVO2:
             return (uint8_t)((Servo_IsReached(st->sid1, st->spwm1, TSEQ_SERVO_TOL) == 1) &&
@@ -347,6 +387,10 @@ static uint8_t step_done(const tstep_t* st)
             }
             return (uint8_t)(car_aim_step() == 1);
 
+        /* 扫描段：车在跑（active=1）就等，跑完（active=0）即完成。 */
+        case ACT_CAR_SCAN:
+            return (uint8_t)(Scan_IsActive() == 0U);
+
         case ACT_DELAY:
         default:
             return 0;   /* 由超时判据放行 */
@@ -374,9 +418,11 @@ static void pose_by_target(uint8_t which)
         else               { p1 = ARM_POSE_D_MID_P1;   p2 = ARM_POSE_D_MID_P2;   p3 = ARM_POSE_D_MID_P3;   tgt_pulses = ARM_TH1_D_MID_PULSE; }
     }
 
-    Servo_SetAngleTime(ARM_TH2_ID, p1, 2000);
-    Servo_SetAngleTime(ARM_TH3_ID, p2, 2000);
-    Servo_SetAngleTime(ARM_TH4_ID, p3, 2000);
+    {
+        const uint8_t  ids[3]  = { ARM_TH2_ID, ARM_TH3_ID, ARM_TH4_ID };
+        const uint16_t pwms[3] = { p1, p2, p3 };
+        Servo_SyncMove(3u, ids, pwms, 2000u);
+    }
     snap_pwm(ARM_TH2_ID, p1, ARM_TH3_ID, p2);
     s_prev_pwm[2] = p3;
     s_pose_tgt[0] = p1;

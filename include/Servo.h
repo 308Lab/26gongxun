@@ -51,6 +51,11 @@ extern "C" {
 #define SERVO_PWM_MAX         2500            /* PWM 最大值 */
 #define SERVO_TIME_MAX        9999            /* 时间上限(ms) */
 
+/* 半双工方向切换后的稳定时间（µs）。
+ * 收发器（半双工缓冲）的使能/禁用有传播延迟，切换后立刻发会削掉首字节 ——
+ * 表现为"某个舵机没收到、不动"。20µs 相对 115200 下一帧 1.56ms 可忽略。 */
+#define SERVO_DIR_SETTLE_US   20
+
 #define SERVO_RX_BUF_SIZE     64              /* 回读接收缓存 */
 
 /* 按 ID 缓存最近位置读回值的容量（缓存 1..SERVO_POS_CACHE_N-1 号）。
@@ -100,6 +105,17 @@ void Servo_SetAngle(uint8_t id, uint16_t pwm);                              /* �
 void Servo_SetAngleTime(uint8_t id, uint16_t pwm, uint16_t time_ms);        /* 带时间控制位置（含偏移） */
 void Servo_SetAngleRaw(uint8_t id, uint16_t pwm);                           /* 同上，【不含】偏移 */
 void Servo_SetAngleTimeRaw(uint8_t id, uint16_t pwm, uint16_t time_ms);     /* 同上，【不含】偏移 */
+
+/**
+ * @brief n 路关节【同步】下发（成组指令 {G0000...}），n = 1..3
+ * @note  为什么需要它：逐条 Servo_SetAngleTime 时，各路各发各的，舵机按各自
+ *        收到的时刻启动 —— 实际上不同时动；而且每条都要切一次半双工方向，
+ *        中间零等待会削掉后几条的首字节（表现就是"某个关节不动"）。
+ *        成组指令只切一次方向，且舵机在收到 '}' 后才同时启动。
+ * @note  time_ms 对所有路统一（不同时停就不叫同步了）；内部自动加零位偏移。
+ *        溢出时降级为逐条发送，不会丢动作。
+ */
+void Servo_SyncMove(uint8_t n, const uint8_t *ids, const uint16_t *pwms, uint16_t time_ms);
 void Servo_ReadAngle(uint8_t id);                                           /* 请求回读位置 */
 void Servo_ReadTempVolt(uint8_t id);                                       /* 请求回读温度+电压 */
 void Servo_ProbeId(uint8_t id);                                             /* 探测 ID 是否在线 */

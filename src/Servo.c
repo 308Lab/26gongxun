@@ -16,6 +16,27 @@ static servo_dir_t s_dir = SERVO_DIR_RX;
 /* 前置声明 */
 static void parse_reply(char *frame, uint8_t len);
 
+/* ==================== 微秒延时（DWT 周期计数器） ====================
+ * 方向切换（见 Servo_SetDir）需要极短的稳定时间，不能只靠 GPIO 写寄存器
+ * 就立刻发字节 —— 半双工收发器（SN74LVC1G126 之类）的使能/禁用有传播延迟，
+ * 切换后立刻发，首字节会被削掉，表现为"那个舵机没收到指令、不动"。
+ * 用 DWT 而不是空循环：F103 是 Cortex-M3 带 DWT，计时精确，也不怕 -O2 把循环优化掉。 */
+static void servo_delay_us(uint32_t us)
+{
+    uint32_t start;
+    uint32_t need;
+
+    if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
+    {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;   /* DWT 的总开关，必须先置 */
+        DWT->CYCCNT = 0U;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+    start = DWT->CYCCNT;
+    need  = us * (SystemCoreClock / 1000000U);
+    while ((uint32_t)(DWT->CYCCNT - start) < need) { }
+}
+
 /* ==================== 通信底层 ==================== */
 
 void Servo_UartInit(void)
@@ -43,7 +64,13 @@ void Servo_SetDir(servo_dir_t dir)
         HAL_GPIO_WritePin(SERVO_TX_SW_PORT, SERVO_TX_SW_PIN, GPIO_PIN_RESET);  /* TX 断开 */
         HAL_GPIO_WritePin(SERVO_RX_SW_PORT, SERVO_RX_SW_PIN, GPIO_PIN_SET);    /* RX 导通 */
     }
-    /* 通道切换稳定延时已移除（测试无延时是否影响收发），如丢首字节可恢复 HAL_Delay(1) */
+
+    /* 通道切换稳定延时 —— 2026-10-14 恢复。
+     * 原先这里注释说"测试无延时是否影响收发"，实际是有影响的：
+     * 三个关节是连发三条指令，中间零等待地反复翻方向，收发器的使能/禁用
+     * 有传播延迟，第二条、第三条的首字节会被削掉 —— 表现就是"某个关节不动"、
+     * "多关节动作变成逐个动"。20µs 对 115200 下 18 字节（1.56ms）的发送可忽略。 */
+    servo_delay_us(SERVO_DIR_SETTLE_US);
 }
 
 void Servo_SendString(const char *str)
@@ -200,6 +227,62 @@ void Servo_SetAngleTimeRaw(uint8_t id, uint16_t pwm, uint16_t time_ms)
 void Servo_SetAngleTime(uint8_t id, uint16_t pwm, uint16_t time_ms)
 {
     Servo_SetAngleTimeRaw(id, apply_zero_offset(id, pwm), time_ms);
+}
+
+/* ==================== 多关节同步下发 ==================== */
+
+/* 把一条 #IDPPWMTTIME! 追加到 body 尾部，返回新的写入位置；放不下则原样返回。
+ * 返回 NULL 表示溢出 —— 调用方据此降级为逐条发送。 */
+static char *append_move(char *p, char *end, uint8_t id, uint16_t pwm, uint16_t time_ms)
+{
+    char one[24];
+    int  n;
+
+    if (time_ms > SERVO_TIME_MAX) time_ms = SERVO_TIME_MAX;
+    n = snprintf(one, sizeof(one), "#%03uP%04uT%04u!", id, pwm, time_ms);
+    if ((n <= 0) || (p + n >= end))
+    {
+        return NULL;
+    }
+    (void)memcpy(p, one, (size_t)n);
+    return p + n;
+}
+
+void Servo_SyncMove(uint8_t n, const uint8_t *ids, const uint16_t *pwms, uint16_t time_ms)
+{
+    char    body[72];
+    char*   p   = body;
+    char*   end = body + sizeof(body) - 2;   /* 留出结尾的 '}' 和 '\0' */
+    char    cmd[80];
+    uint8_t i;
+
+    if ((n == 0u) || (n > 3u) || (ids == NULL) || (pwms == NULL))
+    {
+        return;
+    }
+    if (time_ms > SERVO_TIME_MAX) time_ms = SERVO_TIME_MAX;
+
+    for (i = 0u; i < n; i++)
+    {
+        p = append_move(p, end, ids[i], apply_zero_offset(ids[i], pwms[i]), time_ms);
+        if (p == NULL)
+        {
+            /* 溢出（正常不会发生：3×19 + 2 = 59 < 72）—— 降级为逐条，别丢动作 */
+            for (i = 0u; i < n; i++)
+            {
+                Servo_SetAngleTime(ids[i], pwms[i], time_ms);
+            }
+            return;
+        }
+    }
+
+    *p = '\0';
+    /* 成组同步指令：{G0000<动作><动作>...}
+     * ★ 只切【一次】收发方向 —— 逐条发要切 n 次（2n 次 GPIO 翻转），
+     *   正是丢首字节的根源（见 Servo_SetDir）。
+     * ★ 舵机在收到 '}' 后才同时启动，所以各路是真正同步的。 */
+    (void)snprintf(cmd, sizeof(cmd), "{G0000%s}", body);
+    Servo_SendString(cmd);
 }
 
 /* 请求回读位置：#<ID>PRAD! */

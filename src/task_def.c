@@ -20,24 +20,34 @@
 
 /* ============================================================
  * 任务 A：二维码识别
- *   展开（大臂+小臂同时）→ 腕伸出 → 扫码握手 → 收起（腕+大臂，再小臂）
+ *   2026-10-14 改版（Ryan 定稿）：
+ *     ① P1(第1舵机/大臂) → 1580（零位基准 ARM_POSE_HOME_P1=1892，减 312 ≈ 抬 42°）
+ *        P2/P3【不发指令，保持原位】（Ryan：其它两个关节锁死 = 保持不动）
+ *        θ1 底盘【顺时针 90°】—— 与 P1 动作【同时启动】
+ *     ② 减速扫描（车慢速直行 500，车侧摄像头观察）—— ★ 必须在转向【之后】，
+ *        所以扫描放在任务里而不是路径里（见 task_seq.h 的 ACT_CAR_SCAN 说明）
+ *     ③ 扫码握手
+ *
+ * ★ 顺时针 90° 的脉冲增量：代码里"向右转"= 顺时针 = 负增量，转台 90° = 5600，
+ *   故 pulses = -5600（ARM_POSE_A_SCAN_TH1_PULSE）。
+ * ★ 此处【不发收臂动作】：A 点扫码姿态就是上面这个（P1 抬到 1580），扫完停在扫码姿态。
+ * ★ 方向符号依据：Arm.h「ARM_DIR_CCW 实测=转台顺时针」，
+ *   与 B 任务"转向桶（右侧）"用的 -ARM_STEP_PULSE_TURNTABLE/4 同源。
  * ============================================================ */
 static const tstep_t k_steps_a[] = {
-    {.act = ACT_SERVO2, .sid1 = ARM_TH2_ID, .sid2 = ARM_TH3_ID,
-     .spwm1 = ARM_POSE_A_SCAN_P1, .spwm2 = ARM_POSE_A_SCAN_P2,
-     .stime_ms = 4000, .timeout_ms = 6000},          /* 展开 */
+    /* ① P1 摆到 1580 的同时，θ1 顺时针 90°（两者各发各的、同拍启动） */
+    {.act = ACT_SERVO1_STEP, .sid1 = ARM_TH2_ID, .spwm1 = ARM_POSE_A_SCAN_P1,
+     .stime_ms = 2000, .pulses = ARM_POSE_A_SCAN_TH1_PULSE, .timeout_ms = 8000},
 
-    {.act = ACT_SERVO1, .sid1 = ARM_TH4_ID, .spwm1 = ARM_POSE_A_SCAN_P3,
-     .stime_ms = 2000, .timeout_ms = 4000},          /* 腕伸出（等大臂到位后再动，避磕摄像头） */
+    /* ② 减速扫描：转向完成后车才慢速直行通过目标区。
+     * 500mm @ 0.70mm/周期 ≈ 3.6s，超时给 8s 兜底。 */
+    {.act = ACT_CAR_SCAN, .arg = 500, .timeout_ms = 8000},
 
-    {.act = ACT_VIS_SCAN},                           /* 协议 §3.2：阻塞式握手，不设超时 */
-
-    {.act = ACT_SERVO2, .sid1 = ARM_TH4_ID, .sid2 = ARM_TH2_ID,
-     .spwm1 = ARM_POSE_HOME_P3, .spwm2 = ARM_POSE_HOME_P1,
-     .stime_ms = 3500, .timeout_ms = 5000},          /* 收起：腕 + 大臂 */
-
-    {.act = ACT_SERVO1, .sid1 = ARM_TH3_ID, .spwm1 = ARM_POSE_HOME_P2,
-     .stime_ms = 2000, .timeout_ms = 4000},          /* 再收小臂 */
+    /* ③ 协议 §3.2 的阻塞式握手：发 0x10 等 0x11。
+     * ★ 必须给超时（2026-10-14 加）：这一步的完成判据是"收到 0x11"，没有超时的话，
+     *   上位机没连 / 程序没起 / 扫码失败时会**永远等下去** —— 机械臂卡在扫码姿态上，
+     *   连按键返回都停不下来（任务引擎还在跑）。10s 后照常往下走。 */
+    {.act = ACT_VIS_SCAN, .timeout_ms = 10000},
 
     {.act = ACT_END},
 };

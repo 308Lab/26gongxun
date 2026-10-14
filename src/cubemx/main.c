@@ -63,70 +63,70 @@ UART_HandleTypeDef huart3;
 osThreadId_t MainTaskHandle;
 const osThreadAttr_t MainTask_attributes = {
   .name = "MainTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 12,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for EncCatchTask */
 osThreadId_t EncCatchTaskHandle;
 const osThreadAttr_t EncCatchTask_attributes = {
   .name = "EncCatchTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 8,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for RunTask */
 osThreadId_t RunTaskHandle;
 const osThreadAttr_t RunTask_attributes = {
   .name = "RunTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 8,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* Definitions for OLEDTask */
 osThreadId_t OLEDTaskHandle;
 const osThreadAttr_t OLEDTask_attributes = {
   .name = "OLEDTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 12,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for TickTask */
 osThreadId_t TickTaskHandle;
 const osThreadAttr_t TickTask_attributes = {
   .name = "TickTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 8,
   .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for AAATask */
 osThreadId_t AAATaskHandle;
 const osThreadAttr_t AAATask_attributes = {
   .name = "AAATask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 8,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* Definitions for BBBTask */
 osThreadId_t BBBTaskHandle;
 const osThreadAttr_t BBBTask_attributes = {
   .name = "BBBTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 8,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* Definitions for CCCTask */
 osThreadId_t CCCTaskHandle;
 const osThreadAttr_t CCCTask_attributes = {
   .name = "CCCTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 8,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* Definitions for DDDTask */
 osThreadId_t DDDTaskHandle;
 const osThreadAttr_t DDDTask_attributes = {
   .name = "DDDTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 8,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* Definitions for ServoTask */
 osThreadId_t ServoTaskHandle;
 const osThreadAttr_t ServoTask_attributes = {
   .name = "ServoTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 8,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for EncQueue */
@@ -1274,3 +1274,33 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+/* USER CODE BEGIN 4 */
+/**
+  * @brief  FreeRTOS 栈溢出钩子（configCHECK_FOR_STACK_OVERFLOW = 2 时由内核调用）
+  * @note   为什么要它：此前该检测为 0，任务栈踩穿相邻内存时【无任何迹象】——
+  *         OLEDTask(原 512B) 在子页面绘制（mui + u8g2 字库 + snprintf ≈ 400+B）
+  *         时静默越界，表现为"子页面按键卡死"，且非确定性，极难定位。
+  *         现在溢出会走这里：记下出事的任务名，然后停机（比继续跑更安全 ——
+  *         内存已损坏，继续执行可能乱发舵机/电机指令）。
+  *         现场用调试器看 g_stack_overflow_task 即可知道是哪个任务。
+  */
+volatile char g_stack_overflow_task[configMAX_TASK_NAME_LEN] = {0};
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  (void)xTask;
+  if (pcTaskName != NULL)
+  {
+    uint8_t i;
+    for (i = 0u; (i < (configMAX_TASK_NAME_LEN - 1u)) && (pcTaskName[i] != '\0'); i++)
+    {
+      g_stack_overflow_task[i] = pcTaskName[i];
+    }
+    g_stack_overflow_task[i] = '\0';
+  }
+  /* 关中断停机：栈已损坏，继续跑可能乱发指令。看门狗/复位留给现场处理。 */
+  __disable_irq();
+  for (;;) { }
+}
+/* USER CODE END 4 */

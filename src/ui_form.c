@@ -42,6 +42,31 @@
 
 static mui_t s_mui;
 
+/* ── 无 snprintf 的数字格式化 ────────────────────────────────────────────
+ * ★ 为什么不用 snprintf：newlib-nano 的 snprintf 单帧 136B，再叠 _svfiprintf_r
+ *   116B，合计 250+B —— 在 OLEDTask 这条本就吃栈的路径上代价过大；而且它的
+ *   %u 路径会走 _malloc_r（FreeRTOS 堆只有 8KB，20ms 重绘里反复申请有碎片风险）。
+ *   这几个字段只画 1~4 位无符号数（或带符号的小偏移），手写展开即可，
+ *   栈开销从 250+B 降到几十字节。这就是「子页面卡死」的直接修法之一。 */
+static char* u16_to_str(char *p, uint16_t v)
+{
+    char    tmp[6];
+    uint8_t n = 0u;
+
+    do { tmp[n++] = (char)('0' + (v % 10u)); v /= 10u; } while (v != 0u);
+    while (n != 0u) { *p++ = tmp[--n]; }
+    *p = '\0';
+    return p;
+}
+
+/* 始终带符号，等价 printf 的 %+d（偏移量显示要保持正数带 '+'，与原先一致） */
+static char* i16_sign_str(char *p, int16_t v)
+{
+    if (v < 0) { *p++ = '-'; return u16_to_str(p, (uint16_t)(-(int32_t)v)); }
+    *p++ = '+';
+    return u16_to_str(p, (uint16_t)v);
+}
+
 /* ── 自定义字段：动态只读文本 ──────────────────────────────────────────── */
 
 /* 三路舵机的【实测】位置。数据源是 Servo_LastPos()（回读缓存），
@@ -54,20 +79,18 @@ static uint8_t draw_servo_pwm(mui_t *ui, uint8_t msg)
         u8g2_t*      g = mui_get_U8g2(ui);
         u8g2_uint_t  x = mui_get_x(ui);
         u8g2_uint_t  y = mui_get_y(ui);
-        char         buf[20];
+        char         buf[16];
         int          i;
 
         for (i = 0; i < 3; i++)
         {
             const uint16_t v = Servo_LastPos((uint8_t)(i + 1));
-            if (v == 0U)
-            {
-                (void)snprintf(buf, sizeof(buf), "%s ---", name[i]);  /* 还没读到过 */
-            }
-            else
-            {
-                (void)snprintf(buf, sizeof(buf), "%s %u", name[i], (unsigned)v);
-            }
+            char*          p = buf;
+
+            p[0] = name[i][0]; p[1] = name[i][1]; p[2] = ' '; p += 3;
+            if (v == 0U) { *p++ = '-'; *p++ = '-'; *p++ = '-'; *p = '\0'; }
+            else         { (void)u16_to_str(p, v); }   /* 还没读到过则显示 --- */
+
             u8g2_DrawUTF8(g, x, y + (u8g2_uint_t)(16 * i), buf);   /* 行距 16，同 fds 的约定 */
         }
     }
@@ -85,22 +108,33 @@ static uint8_t draw_qr_digits(mui_t *ui, uint8_t msg)
         u8g2_t*     g = mui_get_U8g2(ui);
         u8g2_uint_t x = mui_get_x(ui);
         u8g2_uint_t y = mui_get_y(ui);
-        char        buf[28];
+        char        buf[20];
+
+        /* 前缀 "二维码 " 是 4 个 UTF-8 字（每个 3 字节），共 12 字节；其余是纯 ASCII。 */
+        static const char k_prefix[] = "\xe4\xba\x8c\xe7\xbb\xb4\xe7\xa0\x81 ";  /* "二维码 " */
+        char* p = buf;
+        uint8_t i;
+
+        for (i = 0u; i < sizeof(k_prefix) - 1u; i++) *p++ = k_prefix[i];
 
         if (g_vision.scan_has_digits != 0U)
         {
-            (void)snprintf(buf, sizeof(buf), "二维码 %c%c%c",
-                           (char)g_vision.scan_digits[0],
-                           (char)g_vision.scan_digits[1],
-                           (char)g_vision.scan_digits[2]);
+            *p++ = (char)g_vision.scan_digits[0];
+            *p++ = (char)g_vision.scan_digits[1];
+            *p++ = (char)g_vision.scan_digits[2];
+            *p = '\0';
         }
         else if (g_vision.scan_done != 0U)
         {
-            (void)snprintf(buf, sizeof(buf), "二维码 未带回");
+            static const char k_tail[] = "\xe6\x9c\xaa\xe5\xb8\xa6\xe5\x9b\x9e";  /* "未带回" */
+            for (i = 0u; i < sizeof(k_tail) - 1u; i++) *p++ = k_tail[i];
+            *p = '\0';
         }
         else
         {
-            (void)snprintf(buf, sizeof(buf), "二维码 等待中");
+            static const char k_tail[] = "\xe7\xad\x89\xe5\xbe\x85\xe4\xb8\xad";  /* "等待中" */
+            for (i = 0u; i < sizeof(k_tail) - 1u; i++) *p++ = k_tail[i];
+            *p = '\0';
         }
         u8g2_DrawUTF8(g, x, y, buf);
     }
@@ -115,15 +149,21 @@ static uint8_t draw_last_error(mui_t *ui, uint8_t msg)
         u8g2_t*     g = mui_get_U8g2(ui);
         u8g2_uint_t x = mui_get_x(ui);
         u8g2_uint_t y = mui_get_y(ui);
-        char        buf[28];
+        char        buf[20];
+        char*       p = buf;
+        uint8_t     i;
 
         if (g_vision.last_err_code != 0U)
         {
-            (void)snprintf(buf, sizeof(buf), "错误码 %u", (unsigned)g_vision.last_err_code);
+            static const char k_pre[]  = "\xe9\x94\x99\xe8\xaf\xaf\xe7\xa0\x81 ";  /* "错误码 " */
+            for (i = 0u; i < sizeof(k_pre) - 1u; i++) *p++ = k_pre[i];
+            (void)u16_to_str(p, (uint16_t)g_vision.last_err_code);
         }
         else
         {
-            (void)snprintf(buf, sizeof(buf), "状态 正常");
+            static const char k_ok[] = "\xe7\x8a\xb6\xe6\x80\x81 \xe6\xad\xa3\xe5\xb8\xb8";  /* "状态 正常" */
+            for (i = 0u; i < sizeof(k_ok) - 1u; i++) *p++ = k_ok[i];
+            *p = '\0';
         }
         u8g2_DrawUTF8(g, x, y, buf);
     }
@@ -144,18 +184,23 @@ static uint8_t draw_zero_pwms(mui_t *ui, uint8_t msg)
     {
         u8g2_t*  g = mui_get_U8g2(ui);
         char     buf[28];
+        char*    p = buf;
         uint16_t a = Servo_LastPos(1);
         uint16_t b = Servo_LastPos(2);
         uint16_t c = Servo_LastPos(3);
 
         if ((a != 0U) && (b != 0U) && (c != 0U))
         {
-            (void)snprintf(buf, sizeof(buf), "1:%u 2:%u 3:%u",
-                           (unsigned)a, (unsigned)b, (unsigned)c);
+            *p++ = '1'; *p++ = ':'; p = u16_to_str(p, a);
+            *p++ = ' '; *p++ = '2'; *p++ = ':'; p = u16_to_str(p, b);
+            *p++ = ' '; *p++ = '3'; *p++ = ':'; p = u16_to_str(p, c);
         }
         else
         {
-            (void)snprintf(buf, sizeof(buf), "回读中 请稍候");   /* 三路都读到才显示 */
+            static const char k_wait[] = "\xe5\x9b\x9e\xe8\xaf\xbb\xe4\xb8\xad \xe8\xaf\xb7\xe7\xa8\x8d\xe5\x80\x99"; /* "回读中 请稍候" */
+            uint8_t i;
+            for (i = 0u; i < sizeof(k_wait) - 1u; i++) *p++ = k_wait[i];
+            *p = '\0';
         }
         u8g2_DrawUTF8(g, mui_get_x(ui), mui_get_y(ui), buf);
     }
@@ -170,29 +215,40 @@ static uint8_t draw_zero_offset(mui_t *ui, uint8_t msg)
     {
         u8g2_t* g = mui_get_U8g2(ui);
         char    buf[28];
+        char*   p = buf;
+        uint8_t i;
 
         if (s_zero_rc == -1)
         {
-            (void)snprintf(buf, sizeof(buf), "回读无效 稍候再试");
+            static const char k[] = "\xe5\x9b\x9e\xe8\xaf\xbb\xe6\x97\xa0\xe6\x95\x88 \xe7\xa8\x8d\xe5\x80\x99\xe5\x86\x8d\xe8\xaf\x95"; /* "回读无效 稍候再试" */
+            for (i = 0u; i < sizeof(k) - 1u; i++) *p++ = k[i];
+            *p = '\0';
         }
         else if (s_zero_rc == -2)
         {
-            (void)snprintf(buf, sizeof(buf), "偏移超限 没摆到位?");
+            static const char k[] = "\xe5\x81\x8f\xe7\xa7\xbb\xe8\xb6\x85\xe9\x99\x90 \xe6\xb2\xa1\xe6\x91\x86\xe5\x88\xb0\xe4\xbd\x8d?"; /* "偏移超限 没摆到位?" */
+            for (i = 0u; i < sizeof(k) - 1u; i++) *p++ = k[i];
+            *p = '\0';
         }
         else if (s_zero_rc == -3)
         {
-            (void)snprintf(buf, sizeof(buf), "Flash 写入失败");
+            static const char k[] = "Flash \xe5\x86\x99\xe5\x85\xa5\xe5\xa4\xb1\xe8\xb4\xa5"; /* "Flash 写入失败" */
+            for (i = 0u; i < sizeof(k) - 1u; i++) *p++ = k[i];
+            *p = '\0';
         }
         else if (ArmZero_IsCalibrated() != 0U)
         {
-            (void)snprintf(buf, sizeof(buf), "偏 %+d %+d %+d",
-                           (int)Servo_GetZeroOffset(1),
-                           (int)Servo_GetZeroOffset(2),
-                           (int)Servo_GetZeroOffset(3));
+            static const char k[] = "\xe5\x81\x8f "; /* "偏 " */
+            for (i = 0u; i < sizeof(k) - 1u; i++) *p++ = k[i];
+            p = i16_sign_str(p, Servo_GetZeroOffset(1)); *p++ = ' ';
+            p = i16_sign_str(p, Servo_GetZeroOffset(2)); *p++ = ' ';
+            p = i16_sign_str(p, Servo_GetZeroOffset(3));
         }
         else
         {
-            (void)snprintf(buf, sizeof(buf), "未标定（出厂零位）");
+            static const char k[] = "\xe6\x9c\xaa\xe6\xa0\x87\xe5\xae\x9a\xef\xbc\x88\xe5\x87\xba\xe5\x8e\x82\xe9\x9b\xb6\xe4\xbd\x8d\xef\xbc\x89"; /* "未标定（出厂零位）" */
+            for (i = 0u; i < sizeof(k) - 1u; i++) *p++ = k[i];
+            *p = '\0';
         }
         u8g2_DrawUTF8(g, mui_get_x(ui), mui_get_y(ui), buf);
     }
@@ -268,9 +324,15 @@ static uint8_t btn_run_task(mui_t *ui, uint8_t msg)
         Task_RunAt((uint8_t)ui->arg);
 
         /* 紧接着跳到执行页（form 5）：一边跑一边能看扫码结果与报错。
-         * 先 SaveForm 才能用键3 返回（MUI 的返回只存一层，这里用上了）。 */
+         * ★ 用 mui_GotoFormAutoCursorPosition，不用裸 mui_GotoForm ——
+         *   MUI 源码对 mui_GotoForm/mui_SaveForm 明写："if called from a field
+         *   function, then the current field variables are destroyed, so that
+         *   call should be the last call in the field callback"。官方按钮
+         *   （mui_u8g2_btn_goto_w1_fi）走的正是 AutoCursorPosition 这个变体。
+         *   （mui_Init 有 memset，menu_form_id[] 全 0 → cursor_position 恒为 0，
+         *     与原先显式传 0 行为等价，见 mui_GotoFormAutoCursorPosition。） */
         mui_SaveForm(ui);
-        (void)mui_GotoForm(ui, 5, 0);
+        (void)mui_GotoFormAutoCursorPosition(ui, 5);
     }
     return 0;
 }
